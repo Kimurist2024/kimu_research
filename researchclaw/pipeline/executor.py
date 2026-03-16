@@ -36,6 +36,101 @@ from researchclaw.experiment.validator import (
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Domain detection — maps research topic to academic domain & venue context
+# ---------------------------------------------------------------------------
+
+_DOMAIN_KEYWORDS: dict[str, tuple[list[str], str, str]] = {
+    # domain_id: (keywords, display_name, top_venues)
+    "ml": (
+        ["machine learning", "deep learning", "neural network", "transformer",
+         "reinforcement learning", "GAN", "diffusion model", "LLM", "language model",
+         "computer vision", "NLP", "representation learning", "self-supervised",
+         "federated learning", "meta-learning", "continual learning", "few-shot",
+         "knowledge distillation", "attention mechanism", "fine-tuning", "RLHF",
+         "vision transformer", "ViT", "BERT", "GPT", "autoencoder"],
+        "machine learning",
+        "NeurIPS, ICML, ICLR",
+    ),
+    "physics": (
+        ["quantum", "thermodynamic", "electrodynamic", "particle physics",
+         "condensed matter", "statistical mechanics", "cosmology", "astrophysics",
+         "plasma", "optics", "photonics", "relativity", "gravitational"],
+        "physics",
+        "Physical Review Letters, Nature Physics, JHEP",
+    ),
+    "chemistry": (
+        ["molecular", "catalysis", "polymer", "organic chemistry", "inorganic",
+         "electrochemistry", "spectroscopy", "crystallography", "drug discovery",
+         "protein folding", "computational chemistry", "DFT", "force field"],
+        "chemistry",
+        "JACS, Nature Chemistry, Angewandte Chemie",
+    ),
+    "economics": (
+        ["econometric", "macroeconomic", "microeconomic", "game theory",
+         "market", "fiscal policy", "monetary", "behavioral economics",
+         "causal inference", "panel data", "regression discontinuity",
+         "instrumental variable", "supply chain", "auction"],
+        "economics",
+        "AER, Econometrica, QJE, Review of Economic Studies",
+    ),
+    "mathematics": (
+        ["theorem", "proof", "conjecture", "topology", "algebra",
+         "number theory", "combinatorics", "differential equation",
+         "stochastic process", "functional analysis", "manifold",
+         "Riemannian", "category theory", "graph theory"],
+        "mathematics",
+        "Annals of Mathematics, Inventiones Mathematicae, JAMS",
+    ),
+    "engineering": (
+        ["robotics", "control system", "signal processing", "FPGA",
+         "embedded system", "VLSI", "antenna", "fluid dynamics", "CFD",
+         "finite element", "structural", "mechatronics", "autonomous"],
+        "engineering",
+        "IEEE Transactions, ASME journals, AIAA",
+    ),
+    "biology": (
+        ["genomics", "proteomics", "transcriptomics", "CRISPR",
+         "single-cell", "phylogenetic", "ecology", "neuroscience",
+         "bioinformatics", "sequencing", "gene expression", "epigenetic"],
+        "biology",
+        "Nature, Science, Cell, PNAS",
+    ),
+}
+
+
+def _detect_domain(topic: str, domains: tuple[str, ...] = ()) -> tuple[str, str, str]:
+    """Detect research domain from topic string and config domains.
+
+    Returns ``(domain_id, display_name, top_venues)``.
+    Falls back to ``("ml", "machine learning", "NeurIPS, ICML, ICLR")``.
+    """
+    # If user explicitly specified domains, check them first
+    for d in domains:
+        d_lower = d.lower().strip()
+        for did, (kws, dname, venues) in _DOMAIN_KEYWORDS.items():
+            if d_lower in (did, dname) or any(k in d_lower for k in kws[:3]):
+                return did, dname, venues
+
+    # Auto-detect from topic text
+    topic_lower = topic.lower()
+    best_did, best_score = "ml", 0
+    for did, (kws, dname, venues) in _DOMAIN_KEYWORDS.items():
+        score = sum(1 for k in kws if k.lower() in topic_lower)
+        if score > best_score:
+            best_score = score
+            best_did = did
+
+    did = best_did
+    _, dname, venues = _DOMAIN_KEYWORDS[did]
+    return did, dname, venues
+
+
+def _is_ml_domain(domain_id: str) -> bool:
+    """Check if the detected domain is ML/AI."""
+    return domain_id == "ml"
+
+
 @dataclass(frozen=True)
 class StageResult:
     """Outcome of executing a single stage."""
@@ -143,6 +238,25 @@ def _read_prior_artifact(run_dir: Path, filename: str) -> str | None:
     return None
 
 
+def _find_prior_file(run_dir: Path, filename: str) -> Path | None:
+    """Like ``_read_prior_artifact`` but returns the *Path* instead of content."""
+    def _stage_sort_key(p: Path) -> tuple[str, int]:
+        name = p.name
+        if "_v" in name:
+            base, _, ver = name.rpartition("_v")
+            try:
+                return (base, -int(ver))
+            except ValueError:
+                return (name, -999)
+        return (name, 0)
+
+    for stage_subdir in sorted(run_dir.glob("stage-*"), key=_stage_sort_key, reverse=True):
+        candidate = stage_subdir / filename
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _load_hardware_profile(run_dir: Path) -> dict[str, Any] | None:
     """Load hardware_profile.json from a prior stage (usually stage-01)."""
     raw = _read_prior_artifact(run_dir, "hardware_profile.json")
@@ -219,6 +333,49 @@ def _chat_with_prompt(
     raise last_exc  # type: ignore[misc]  # unreachable but satisfies type checker
 
 
+def _generate_neurips_checklist(
+    has_experiments: bool = True,
+    has_theory: bool = False,
+    has_code: bool = True,
+) -> str:
+    """Generate a NeurIPS-style paper checklist appendix in markdown.
+
+    This checklist is based on the NeurIPS 2025 submission requirements.
+    It is appended to the paper before LaTeX conversion.
+    """
+    items = [
+        ("Claims", "Do the main claims accurately reflect the paper's contributions and scope?", "Yes"),
+        ("Limitations", "Does the paper discuss limitations of the work?", "Yes"),
+    ]
+    if has_theory:
+        items.append(
+            ("Theory", "Are all assumptions stated and proofs included?", "Yes")
+        )
+    items.extend([
+        ("Experiments reproducibility", "Does the paper fully disclose experimental settings?", "Yes" if has_experiments else "NA"),
+        ("Code and data", "Is code or data provided for reproducibility?", "Yes" if has_code else "No"),
+        ("Experimental details", "Are training details and hyperparameters specified?", "Yes" if has_experiments else "NA"),
+        ("Error bars", "Are error bars or confidence intervals reported?", "Yes" if has_experiments else "NA"),
+        ("Compute resources", "Are compute requirements documented?", "Yes" if has_experiments else "NA"),
+        ("Code of ethics", "Does the work comply with the code of ethics?", "Yes"),
+        ("Broader impacts", "Are potential negative societal impacts discussed?", "Yes"),
+        ("Licenses", "Are licenses for used assets respected?", "Yes"),
+        ("New assets", "Are newly released assets documented?", "NA"),
+        ("Human subjects", "Were IRB approvals obtained if applicable?", "NA"),
+    ])
+
+    lines = [
+        "## NeurIPS Paper Checklist",
+        "",
+    ]
+    for label, question, answer in items:
+        lines.append(f"**{label}**: {question}")
+        lines.append(f"Answer: [{answer}]")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def _extract_paper_title(md_text: str) -> str:
     """Extract paper title from markdown text for LaTeX generation.
 
@@ -275,7 +432,11 @@ def _safe_filename(name: str) -> str:
     return name[:100] or "unnamed"
 
 
-def _collect_experiment_results(run_dir: Path) -> dict[str, Any]:
+def _collect_experiment_results(
+    run_dir: Path,
+    metric_key: str = "",
+    metric_direction: str = "maximize",
+) -> dict[str, Any]:
     """Aggregate experiment metrics from runs/ directory across prior stages.
 
     Returns a dict with ``runs``, ``metrics_summary``, ``best_run``,
@@ -341,13 +502,20 @@ def _collect_experiment_results(run_dir: Path) -> dict[str, Any]:
                 "count": len(values),
             }
 
-    # Find best run (by first metric)
+    # Find best run using metric_key and metric_direction
     best_run: dict[str, Any] | None = None
     if runs_data:
 
         def _primary_metric(r: dict[str, Any]) -> float:
             m = r.get("metrics") or {}
             if isinstance(m, dict):
+                # Try specific metric_key first
+                if metric_key and metric_key in m:
+                    try:
+                        return float(m[metric_key])
+                    except (ValueError, TypeError):
+                        pass
+                # Fallback to first metric
                 for v in m.values():
                     try:
                         return float(v)
@@ -355,7 +523,8 @@ def _collect_experiment_results(run_dir: Path) -> dict[str, Any]:
                         pass
             return 0.0
 
-        best_run = max(runs_data, key=_primary_metric)
+        _cmp = min if metric_direction == "minimize" else max
+        best_run = _cmp(runs_data, key=_primary_metric)
 
     # Build LaTeX table
     latex_lines = [
@@ -629,13 +798,14 @@ def _detect_runtime_issues(sandbox_result: Any) -> str:
         except (TypeError, ValueError):
             pass
 
-    # Check stdout for NaN values
+    # Check stdout for NaN values (word boundary to avoid matching "Nanotechnology" etc.)
     stdout = getattr(sandbox_result, "stdout", "") or ""
-    if "nan" in stdout.lower():
+    _nan_re = re.compile(r"\bnan\b", re.IGNORECASE)
+    if _nan_re.search(stdout):
         nan_lines = [
             line.strip()
             for line in stdout.splitlines()
-            if "nan" in line.lower()
+            if _nan_re.search(line)
         ]
         if nan_lines:
             issues.append(
@@ -966,9 +1136,10 @@ Generated: {_utcnow_iso()}
 
 
 def _default_quality_report(threshold: float) -> dict[str, Any]:
-    score = float(threshold) if threshold > 0 else 7.5
+    # When LLM fails, return below-threshold score to force revision
+    score = max(1.0, float(threshold) - 2.0) if threshold > 0 else 5.0
     score = max(1.0, min(10.0, score))
-    verdict = "proceed" if score >= 7.0 else "pivot"
+    verdict = "revise"
     return {
         "score_1_to_10": round(score, 2),
         "verdict": verdict,
@@ -1147,7 +1318,10 @@ Derived from `goal.md` for topic: {config.research.topic}
                         ),
                     }
                 ],
-                system="You are a senior ML researcher evaluating research topic quality.",
+                system=(
+                    f"You are a senior {_detect_domain(config.research.topic, config.research.domains)[1]} "
+                    f"researcher evaluating research topic quality."
+                ),
             )
             _eval_data = _safe_json_loads(_eval_resp.content, {})
             if isinstance(_eval_data, dict):
@@ -1549,7 +1723,9 @@ def _execute_literature_collect(
             candidates = [row for row in payload["candidates"] if isinstance(row, dict)]
 
     # --- Ultimate fallback: placeholder data ---
+    real_search_succeeded = bool(candidates)
     if not candidates:
+        logger.warning("Stage 4: All literature searches failed — using placeholder papers")
         candidates = [
             {
                 "id": f"candidate-{idx + 1}",
@@ -1559,6 +1735,7 @@ def _execute_literature_collect(
                 "year": 2024,
                 "abstract": f"This candidate investigates {topic} and reports preliminary findings.",
                 "collected_at": _utcnow_iso(),
+                "is_placeholder": True,
             }
             for idx in range(max(20, config.research.daily_paper_count or 20))
         ]
@@ -1788,6 +1965,7 @@ def _execute_synthesis(
         resp = llm.chat(
             [{"role": "user", "content": sp.user}],
             system=sp.system,
+            max_tokens=sp.max_tokens or 8192,
         )
         synthesis_md = resp.content
     else:
@@ -1836,17 +2014,22 @@ def _multi_perspective_generate(
     perspectives_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, str] = {}
     for role_name, role_prompts in roles.items():
-        system = _render(role_prompts["system"], variables)
-        user = _render(role_prompts["user"], variables)
-        resp = llm.chat(
-            [{"role": "user", "content": user}],
-            system=system,
-        )
-        results[role_name] = resp.content
-        (perspectives_dir / f"{role_name}.md").write_text(
-            resp.content, encoding="utf-8"
-        )
-        logger.info("Debate perspective '%s' generated (%d chars)", role_name, len(resp.content))
+        try:
+            system = _render(role_prompts["system"], variables)
+            user = _render(role_prompts["user"], variables)
+            resp = llm.chat(
+                [{"role": "user", "content": user}],
+                system=system,
+            )
+            results[role_name] = resp.content
+            (perspectives_dir / f"{role_name}.md").write_text(
+                resp.content, encoding="utf-8"
+            )
+            logger.info("Debate perspective '%s' generated (%d chars)", role_name, len(resp.content))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Debate perspective '%s' failed: %s", role_name, exc)
+    if len(results) < 2:
+        logger.error("Multi-perspective debate: only %d/%d roles succeeded", len(results), len(roles))
     return results
 
 
@@ -1908,6 +2091,7 @@ def _execute_hypothesis_gen(
             topic=config.research.topic,
             hypotheses_text=hypotheses_md,
             papers_already_seen=papers_seen,
+            s2_api_key=getattr(config.llm, "s2_api_key", ""),
         )
         (stage_dir / "novelty_report.json").write_text(
             json.dumps(novelty_report, indent=2, ensure_ascii=False),
@@ -1976,6 +2160,9 @@ def _execute_experiment_design(
             preamble=preamble,
             hypotheses=hypotheses,
             dataset_guidance=_dg_block,
+            time_budget_sec=config.experiment.time_budget_sec,
+            metric_key=config.experiment.metric_key,
+            metric_direction=config.experiment.metric_direction,
         )
         resp = _chat_with_prompt(
             llm,
@@ -2040,13 +2227,13 @@ def _execute_experiment_design(
         plan = {
             "topic": config.research.topic,
             "generated": _utcnow_iso(),
-            "objectives": ["Evaluate hypotheses with controlled ablations"],
-            "datasets": ["regime_easy", "regime_hard"],
-            "baselines": ["standard_baseline", "oracle_upper_bound"],
-            "proposed_methods": ["proposed_method", "proposed_method_variant"],
-            "ablations": ["no_key_component", "reduced_capacity"],
+            "objectives": ["Evaluate hypotheses with controlled experiments"],
+            "datasets": ["primary_dataset", "secondary_dataset"],
+            "baselines": ["established_method_1", "established_method_2"],
+            "proposed_methods": ["proposed_approach", "proposed_variant"],
+            "ablations": ["without_key_component", "simplified_version"],
             "metrics": [config.experiment.metric_key, "secondary_metric"],
-            "risks": ["overfitting", "data leakage"],
+            "risks": ["validity threats", "confounding variables"],
             "compute_budget": {"max_gpu": 1, "max_hours": 4},
         }
     # ── BA: BenchmarkAgent — intelligent dataset/baseline selection ──────
@@ -2100,9 +2287,15 @@ def _execute_experiment_design(
                 plan["datasets"] = [
                     b["name"] for b in _benchmark_plan.selected_benchmarks
                 ]
+                # Normalize existing baselines to list (LLM may emit dict)
+                _baselines_from_plan = plan.get("baselines", [])
+                if isinstance(_baselines_from_plan, dict):
+                    _baselines_from_plan = list(_baselines_from_plan.keys())
+                elif not isinstance(_baselines_from_plan, list):
+                    _baselines_from_plan = []
                 plan["baselines"] = [
                     bl["name"] for bl in _benchmark_plan.selected_baselines
-                ] + plan.get("baselines", [])
+                ] + _baselines_from_plan
                 # Deduplicate baselines
                 plan["baselines"] = list(dict.fromkeys(plan["baselines"]))
 
@@ -2162,13 +2355,19 @@ def _execute_code_generation(
     if config.experiment.mode in ("sandbox", "docker"):
         if config.experiment.mode == "docker":
             pkg_prefix = "docker mode"
-            pkg_extras = (
+            _net_policy = config.experiment.docker.network_policy
+            _base_pkgs = (
                 ", torchvision, torchaudio, matplotlib, seaborn, scipy, "
                 "tqdm, torchdiffeq, gymnasium, networkx, PyYAML, Pillow, "
                 "transformers, datasets, accelerate, peft, bitsandbytes, "
-                "timm, einops, torchmetrics, h5py, "
-                "and additional pip-installable packages (auto-detected from imports)"
+                "timm, einops, torchmetrics, h5py"
             )
+            if _net_policy == "none":
+                pkg_extras = _base_pkgs + " (ONLY pre-installed packages — NO pip install available)"
+            elif _net_policy in ("setup_only", "pip_only"):
+                pkg_extras = _base_pkgs + ", and additional pip-installable packages via requirements.txt"
+            else:
+                pkg_extras = _base_pkgs + ", and additional pip-installable packages (auto-detected from imports)"
         else:
             pkg_prefix = "sandbox mode"
             pkg_extras = ""
@@ -2215,16 +2414,36 @@ def _execute_code_generation(
 
     # --- Dataset guidance + setup script + HP reporting (docker/sandbox modes) ---
     extra_guidance = ""
+    _net_policy = getattr(getattr(config, "docker", None), "network_policy", "setup_only")
     if config.experiment.mode in ("sandbox", "docker"):
-        try:
-            extra_guidance += _pm.block("dataset_guidance")
-        except Exception:  # noqa: BLE001
-            pass
-        if config.experiment.mode == "docker":
+        _net_policy = (
+            config.experiment.docker.network_policy
+            if config.experiment.mode == "docker"
+            else "none"  # sandbox mode has no network
+        )
+        if _net_policy == "none":
+            # Network disabled: inject strict offline-only guidance
             try:
-                extra_guidance += _pm.block("setup_script_guidance")
+                extra_guidance += _pm.block("network_disabled_guidance")
             except Exception:  # noqa: BLE001
                 pass
+        elif _net_policy == "full":
+            try:
+                extra_guidance += _pm.block("dataset_guidance")
+                extra_guidance += _pm.block("network_full_guidance")
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            # setup_only or pip_only — existing behavior
+            try:
+                extra_guidance += _pm.block("dataset_guidance")
+            except Exception:  # noqa: BLE001
+                pass
+            if config.experiment.mode == "docker":
+                try:
+                    extra_guidance += _pm.block("setup_script_guidance")
+                except Exception:  # noqa: BLE001
+                    pass
         try:
             extra_guidance += _pm.block("hp_reporting")
         except Exception:  # noqa: BLE001
@@ -2411,12 +2630,18 @@ def _execute_code_generation(
     elif llm is not None:
         # ── Legacy single-shot generation ─────────────────────────────────
         topic = config.research.topic
+        _md = config.experiment.metric_direction
+        _md_hint = (
+            f"`{_md}` — use direction={'lower' if _md == 'minimize' else 'higher'} "
+            f"in METRIC_DEF. You MUST NOT use the opposite direction."
+        )
         sp = _pm.for_stage(
             "code_generation",
             topic=topic,
             metric=metric,
             pkg_hint=pkg_hint + "\n" + compute_budget + "\n" + extra_guidance,
             exp_plan=exp_plan,
+            metric_direction_hint=_md_hint,
         )
         # R13-3: Use higher max_tokens for reasoning models (they consume tokens
         # for internal chain-of-thought). Retry once with even higher limit on empty.
@@ -2457,7 +2682,7 @@ def _execute_code_generation(
                 resp.content[:300],
             )
 
-    # --- Fallback: real gradient descent on a quadratic objective ---
+    # --- Fallback: generic numerical experiment ---
     if not files:
         files = {
             "main.py": (
@@ -2465,20 +2690,26 @@ def _execute_code_generation(
                 "\n"
                 "np.random.seed(42)\n"
                 "\n"
-                "# Objective: minimize f(x) = sum(x_i^2) for x in R^10\n"
-                "# Gradient: grad_f(x) = 2 * x\n"
+                "# Fallback experiment: parameter sweep on a synthetic objective\n"
+                "# This runs when LLM code generation fails to produce valid code.\n"
                 "dim = 10\n"
-                "x = np.random.randn(dim)\n"
-                "lr = 0.1\n"
-                "best_loss = float('inf')\n"
+                "n_conditions = 3\n"
+                "results = {}\n"
                 "\n"
-                "for step in range(50):\n"
-                "    loss = float(np.sum(x ** 2))\n"
-                "    best_loss = min(best_loss, loss)\n"
-                "    grad = 2.0 * x\n"
-                "    x = x - lr * grad\n"
-                "    if step % 5 == 0 or step == 49:\n"
-                f"        print('{metric}: ' + format(best_loss, '.6f'))\n"
+                "for cond_idx in range(n_conditions):\n"
+                "    cond_name = f'condition_{cond_idx}'\n"
+                "    scores = []\n"
+                "    for seed in range(3):\n"
+                "        rng = np.random.RandomState(seed + cond_idx * 100)\n"
+                "        x = rng.randn(dim)\n"
+                "        score = float(1.0 / (1.0 + np.sum(x ** 2)))\n"
+                "        scores.append(score)\n"
+                "    mean_score = float(np.mean(scores))\n"
+                "    results[cond_name] = mean_score\n"
+                f"    print(f'condition={{cond_name}} {metric}: {{mean_score:.6f}}')\n"
+                "\n"
+                "best = max(results, key=results.get)\n"
+                f"print(f'{metric}: {{results[best]:.6f}}')\n"
             )
         }
 
@@ -2540,9 +2771,28 @@ def _execute_code_generation(
 
     # --- R10-Fix6: Code complexity and quality check ---
     from researchclaw.experiment.validator import (
+        auto_fix_unbound_locals,
         check_code_complexity,
         deep_validate_files,
     )
+
+    # --- BUG-3 fix: Programmatic auto-fix for UnboundLocalError patterns ---
+    _total_ub_fixes = 0
+    for fname, code in list(files.items()):
+        if fname.endswith(".py"):
+            fixed_code, n_fixes = auto_fix_unbound_locals(code)
+            if n_fixes > 0:
+                files[fname] = fixed_code
+                (exp_dir / fname).write_text(fixed_code, encoding="utf-8")
+                _total_ub_fixes += n_fixes
+                logger.info(
+                    "Stage 10: auto-fixed %d UnboundLocalError risk(s) in %s",
+                    n_fixes, fname,
+                )
+    if _total_ub_fixes:
+        logger.info(
+            "Stage 10: auto-fixed %d total UnboundLocalError risks", _total_ub_fixes
+        )
 
     complexity_warnings: list[str] = []
     for fname, code in files.items():
@@ -2561,7 +2811,7 @@ def _execute_code_generation(
     # --- P1.2: If critical deep issues found, attempt one repair cycle ---
     critical_deep = [w for w in deep_warnings if any(
         kw in w for kw in ("UnboundLocalError", "unregistered", "does not exist",
-                           "empty or trivial subclass")
+                           "empty or trivial subclass", "does NOT override")
     )]
     if critical_deep and llm is not None:
         logger.info(
@@ -2581,13 +2831,16 @@ def _execute_code_generation(
             f"- Variables used after if/else must be defined before the branch\n"
             f"- Use scipy.special.erf, not np.erf\n"
             f"- Ablation/variant classes must have genuinely different logic\n"
-            f"- Every class must have a real implementation, not just `pass`\n\n"
+            f"- Every class must have a real implementation, not just `pass`\n"
+            f"- Ablation classes MUST override the parent method that implements "
+            f"the component being ablated (e.g., if ablating attention, override "
+            f"the attention method with a simpler alternative like mean pooling)\n\n"
             f"Current code:\n{all_code_ctx}\n"
         )
         try:
             repair_resp = _chat_with_prompt(
                 llm,
-                _pm.prompts["code_generation"]["system"],
+                _pm.system("code_generation"),
                 repair_prompt,
                 max_tokens=_code_max_tokens,
             )
@@ -2602,7 +2855,7 @@ def _execute_code_generation(
                     w for w in deep_warnings_after
                     if any(kw in w for kw in (
                         "UnboundLocalError", "unregistered", "does not exist",
-                        "empty or trivial subclass"
+                        "empty or trivial subclass", "does NOT override"
                     ))
                 ])
                 logger.info(
@@ -2632,8 +2885,8 @@ def _execute_code_generation(
         if len(all_code_review) > 12000:
             all_code_review = all_code_review[:12000] + "\n... [truncated]"
         review_prompt = (
-            f"You are a senior ML researcher reviewing experiment code for a "
-            f"conference submission.\n\n"
+            f"You are a senior researcher reviewing experiment code for a "
+            f"research submission.\n\n"
             f"TOPIC: {config.research.topic}\n"
             f"EXPERIMENT PLAN:\n{exp_plan[:3000]}\n\n"
             f"CODE:\n```python\n{all_code_review}\n```\n\n"
@@ -2654,8 +2907,8 @@ def _execute_code_generation(
         )
         try:
             review_resp = llm.chat(
-                [{"role": "user", "content": review_prompt}],
                 system="You are a meticulous ML code reviewer. Be strict.",
+                user=review_prompt,
                 max_tokens=2048,
             )
             # Extract JSON from LLM response (may be wrapped in markdown fences)
@@ -2759,8 +3012,8 @@ def _execute_code_generation(
         )
         try:
             align_resp = llm.chat(
-                [{"role": "user", "content": align_prompt}],
                 system="You are a scientific code reviewer checking topic-experiment alignment.",
+                user=align_prompt,
                 max_tokens=1024,
             )
             align_data = _safe_json_loads(align_resp.content, {})
@@ -2815,8 +3068,8 @@ def _execute_code_generation(
                 '{"has_duplicates": true/false, "details": "which conditions are identical"}'
             )
             abl_resp = llm.chat(
-                [{"role": "user", "content": ablation_prompt}],
                 system="You are a code reviewer checking experimental conditions.",
+                user=ablation_prompt,
                 max_tokens=512,
             )
             abl_data = _safe_json_loads(abl_resp.content, {})
@@ -3229,12 +3482,12 @@ def _execute_iterative_refine(
     metric_key = config.experiment.metric_key
     metric_direction = config.experiment.metric_direction
 
-    # P9: Auto-detect metric direction from experiment code's METRIC_DEF output.
+    # P9: Detect metric direction mismatch between config and experiment code.
     # The code-gen stage instructs experiments to print a line like:
     #   METRIC_DEF: primary_metric | direction=higher | desc=...
-    # If we find this in prior run stdout, override the config's metric_direction
-    # to prevent the common mismatch where config says "minimize" but the
-    # experiment actually produces an accuracy/return metric (higher is better).
+    # Log a warning if mismatch is detected, but trust the config value
+    # (BUG-06 fix: no longer auto-override, since Stage 9 and 12 now
+    # explicitly enforce config.metric_direction in prompts).
     _runs_dir_detect = _read_prior_artifact(run_dir, "runs/")
     if _runs_dir_detect and Path(_runs_dir_detect).is_dir():
         import re as _re_detect
@@ -3253,12 +3506,12 @@ def _execute_iterative_refine(
                         logger.warning(
                             "P9: Metric direction mismatch — config says '%s' but "
                             "experiment code declares 'direction=%s'. "
-                            "Auto-correcting to '%s'.",
+                            "Keeping config value '%s'. Code will be "
+                            "corrected in next refinement cycle.",
                             metric_direction,
                             _detected,
-                            _detected_dir,
+                            metric_direction,
                         )
-                        metric_direction = _detected_dir
                     break
             except OSError:
                 pass
@@ -3387,6 +3640,7 @@ def _execute_iterative_refine(
     best_metric = baseline_metric
     best_version = "experiment/"
     no_improve_streak = 0
+    consecutive_no_metrics = 0
 
     log: dict[str, Any] = {
         "generated": _utcnow_iso(),
@@ -3489,10 +3743,16 @@ def _execute_iterative_refine(
         if len(_valid_metrics) >= 2:
             _last_two = _valid_metrics[-2:]
             _saturated = False
+            # Use relative change rate instead of hard-coded thresholds
+            _change_rate = abs(_last_two[-1] - _last_two[-2]) / max(abs(_last_two[-2]), 1e-8)
             if metric_direction == "minimize":
-                _saturated = all(m <= 0.001 for m in _last_two)
+                _saturated = all(m <= 0.001 for m in _last_two) or (
+                    _change_rate < 0.001 and _last_two[-1] < 0.01
+                )
             else:
-                _saturated = all(m >= 0.999 for m in _last_two)
+                _saturated = all(m >= 0.999 for m in _last_two) or (
+                    _change_rate < 0.001 and _last_two[-1] > 0.99
+                )
             if _saturated:
                 _saturation_hint = (
                     "\n\nWARNING — BENCHMARK SATURATION DETECTED:\n"
@@ -3510,6 +3770,14 @@ def _execute_iterative_refine(
                 logger.warning("Stage 13: metric saturation detected, injecting difficulty upgrade hint")
 
         files_context = _files_to_context(best_files)
+        # BUG-10 fix: anchor refinement to original experiment plan
+        _exp_plan_anchor = ""
+        if _exp_plan_text.strip():
+            _exp_plan_anchor = (
+                "Original experiment plan (exp_plan.yaml):\n"
+                "```yaml\n" + _exp_plan_text[:4000] + "\n```\n"
+                "You MUST preserve ALL condition names from this plan.\n\n"
+            )
         ip = _pm.sub_prompt(
             "iterative_improve",
             metric_key=metric_key,
@@ -3518,6 +3786,7 @@ def _execute_iterative_refine(
             run_summaries=chr(10).join(run_summaries[:20]),
             condition_coverage_hint=_condition_coverage_hint,
             topic=config.research.topic,
+            exp_plan_anchor=_exp_plan_anchor,
         )
 
         # --- Timeout-aware prompt injection ---
@@ -3695,6 +3964,7 @@ def _execute_iterative_refine(
                     iter_record["runtime_repaired"] = True
 
             if metric_val is not None:
+                consecutive_no_metrics = 0
                 # R6-1: Only count toward no_improve_streak when we have real metrics
                 if _is_better(metric_val, best_metric):
                     best_metric = metric_val
@@ -3704,7 +3974,8 @@ def _execute_iterative_refine(
                     no_improve_streak = 0
                 else:
                     no_improve_streak += 1
-            # else: metric_val is None (no data) — don't count as "no improvement"
+            else:
+                consecutive_no_metrics += 1
         elif validation.ok and best_version == "experiment/":
             best_files = dict(candidate_files)
             best_version = f"experiment_v{iteration}/"
@@ -3713,6 +3984,11 @@ def _execute_iterative_refine(
         _metrics_history.append(metric_val)
 
         log["iterations"].append(iter_record)
+
+        if consecutive_no_metrics >= 3:
+            log["stop_reason"] = "consecutive_no_metrics"
+            logger.warning("Stage 13: Aborting after %d consecutive iterations without metrics", consecutive_no_metrics)
+            break
 
         if no_improve_streak >= 2:
             log["converged"] = True
@@ -3797,10 +4073,7 @@ def _execute_result_analysis(
                 _refine_metrics = _sbx.get("metrics", {})
                 if _refine_metrics and (
                     not exp_data["metrics_summary"]
-                    or len(_refine_metrics) > sum(
-                        s.get("count", 0)
-                        for s in exp_data["metrics_summary"].values()
-                    )
+                    or len(_refine_metrics) > len(exp_data["metrics_summary"])
                 ):
                     # Refinement has richer data — rebuild metrics_summary from it
                     _new_summary: dict[str, dict[str, float | None]] = {}
@@ -3905,6 +4178,37 @@ def _execute_result_analysis(
             except (ValueError, TypeError):
                 pass
 
+    # BUG-09 fix: If no condition summaries were built (metrics don't use
+    # condition/metric format), try to extract from metrics_summary or
+    # structured_results so FigureAgent has data to work with.
+    if not _condition_summaries and _ms:
+        # Try to parse condition data from metrics_summary keys
+        for _mk, _mv in _ms.items():
+            parts = _mk.split("/")
+            if len(parts) >= 2:
+                cond = parts[0]
+                metric_name = parts[-1]
+                if cond not in _condition_summaries:
+                    _condition_summaries[cond] = {"metrics": {}}
+                try:
+                    _val = float(_mv) if not isinstance(_mv, dict) else None
+                    if _val is not None:
+                        _condition_summaries[cond]["metrics"][metric_name] = _val
+                except (ValueError, TypeError):
+                    pass
+    if not _condition_summaries:
+        # Last resort: build from structured_results condition keys
+        _sr = exp_data.get("structured_results", {})
+        if isinstance(_sr, dict):
+            for _sk, _sv in _sr.items():
+                if isinstance(_sv, dict) and _sk not in ("metadata", "config"):
+                    _condition_summaries[_sk] = {"metrics": {}}
+                    for _smk, _smv in _sv.items():
+                        try:
+                            _condition_summaries[_sk]["metrics"][_smk] = float(_smv)
+                        except (ValueError, TypeError):
+                            pass
+
     # R33: Build per-seed data structure (needed for CIs and paired tests below)
     _seed_data: dict[str, dict[int, float]] = {}  # {condition: {seed: value}}
     for _mk, _mv in _best_metrics.items():
@@ -3998,9 +4302,16 @@ def _execute_result_analysis(
                     _mean_d = statistics.mean(_diffs)
                     _std_d = statistics.stdev(_diffs) if _n > 1 else 0.0
                     _t = (_mean_d / (_std_d / (_n ** 0.5))) if _std_d > 0 else 0.0
-                    # Two-tailed p-value approximation (normal for large n)
+                    _df = _n - 1
+                    # Two-tailed p-value using t-distribution
                     import math
-                    _p = 2 * (1 - 0.5 * (1 + math.erf(abs(_t) / (2 ** 0.5))))
+                    try:
+                        from scipy.stats import t as _t_dist
+                        _p = float(2 * _t_dist.sf(abs(_t), _df))
+                    except ImportError:
+                        _p = 2 * (1 - 0.5 * (1 + math.erf(abs(_t) / (2 ** 0.5))))
+                        if _df < 30:
+                            _p = min(1.0, _p * (1 + 2.5 / max(_df, 1)))
                     _pipeline_paired.append({
                         "method": _other_cond,
                         "baseline": _baseline_cond,
@@ -4065,6 +4376,15 @@ def _execute_result_analysis(
         _primary_vals = []
         for _cs in _condition_summaries.values():
             if isinstance(_cs, dict):
+                # Try 'metrics' dict first (actual structure), then 'primary_metric' fallback
+                _metrics = _cs.get("metrics", {})
+                if isinstance(_metrics, dict) and _metrics:
+                    _pv_candidate = next(iter(_metrics.values()), None)
+                    if isinstance(_pv_candidate, dict):
+                        _pv_candidate = _pv_candidate.get("mean")
+                    if isinstance(_pv_candidate, (int, float)):
+                        _primary_vals.append(_pv_candidate)
+                        continue
                 _pm = _cs.get("primary_metric", {})
                 _pv = _pm.get("mean") if isinstance(_pm, dict) else _pm
                 if isinstance(_pv, (int, float)):
@@ -4212,8 +4532,14 @@ Generated: {_utcnow_iso()}
             # Build conditions list from condition_summaries
             _fa_conditions = list(_condition_summaries.keys()) if _condition_summaries else []
 
+            # BUG-09 fix: pass best_run metrics as fallback data if
+            # structured_results is empty, so Planner has some data to chart
+            _fa_exp_results = exp_data.get("structured_results", {})
+            if not _fa_exp_results and _best_metrics:
+                _fa_exp_results = {"best_run_metrics": _best_metrics}
+
             _fa_plan = _fa.orchestrate({
-                "experiment_results": exp_data.get("structured_results", {}),
+                "experiment_results": _fa_exp_results,
                 "condition_summaries": _condition_summaries,
                 "metrics_summary": exp_data.get("metrics_summary", {}),
                 "metric_key": config.experiment.metric_key,
@@ -4692,8 +5018,9 @@ def _write_paper_sections(
         "Follow the LENGTH REQUIREMENTS strictly:\n\n"
         "1. **Title** (HARD RULE: MUST be 14 words or fewer. Create a catchy method name "
         "first, then build the title: 'MethodName: Subtitle'. If your title exceeds 14 words, "
-        "it will be automatically rejected.)\n"
-        f"2. **Abstract** (180-220 words){abstract_structure}\n"
+        "it will be automatically rejected. NEVER use 'Untitled Paper'.)\n"
+        f"2. **Abstract** (150-220 words — HARD LIMIT. Do NOT exceed 220 words. "
+        f"Do NOT include raw metric paths or 16-digit decimals.){abstract_structure}\n"
         "3. **Introduction** (800-1000 words): real-world motivation, problem statement, "
         "research gap analysis with citations, method overview, 3-4 contributions as bullet points, "
         "paper organization paragraph. MUST cite 8-12 references.\n"
@@ -4779,8 +5106,17 @@ def _write_paper_sections(
         "comparison with prior work (CITE 3-5 papers here!), practical implications.\n"
         "9. **Limitations** (200-300 words): honest assessment of scope, dataset, methodology. "
         "ALL caveats consolidated HERE — nowhere else in the paper.\n"
-        "10. **Conclusion** (200-300 words): summary of contributions (NO number repetition from "
-        "Results), main findings, concrete future work with specific research directions.\n\n"
+        "10. **Conclusion** (100-200 words MAXIMUM — this is a HARD LIMIT): "
+        "Summarize contributions in 2-3 sentences. State main finding in 1 sentence. "
+        "Suggest 2-3 concrete future directions in 1-2 sentences. "
+        "Do NOT repeat any specific numbers from Results. Do NOT restate the abstract. "
+        "A good conclusion is SHORT and forward-looking.\n\n"
+        "CRITICAL FORMATTING RULES FOR ALL SECTIONS:\n"
+        "- Write as FLOWING PROSE paragraphs, NOT bullet-point lists\n"
+        "- NEVER dump raw metric paths like 'config/method_name/seed_3/primary_metric'\n"
+        "- All numbers must be rounded to 4 decimal places maximum\n"
+        "- Every table MUST have a descriptive caption (not just 'Table 1')\n"
+        "- Use \\begin{algorithm} or pseudocode notation, NOT \\begin{verbatim}\n\n"
         "Output markdown with ## headers. Do NOT include a References section."
     )
     resp3 = _chat_with_prompt(llm, system, call3_user, max_tokens=_paper_max_tokens)
@@ -4810,6 +5146,475 @@ def _write_paper_sections(
     return draft
 
 
+# ---------------------------------------------------------------------------
+# Draft quality validation (section balance + bullet-point density)
+# ---------------------------------------------------------------------------
+
+# Sections where bullets/numbered lists are acceptable.
+_BULLET_LENIENT_SECTIONS = frozenset({
+    "introduction", "limitations", "limitation",
+    "limitations and future work", "abstract",
+})
+
+# Main body sections used for balance ratio check.
+_BALANCE_SECTIONS = frozenset({
+    "introduction", "related work", "method", "experiments", "results",
+    "discussion",
+})
+
+
+def _validate_draft_quality(
+    draft: str,
+    stage_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Validate a paper draft for section balance and prose quality.
+
+    Checks:
+    1. Per-section word count vs ``SECTION_WORD_TARGETS``.
+    2. Bullet-point / numbered-list density per section.
+    3. Largest-to-smallest main-section word-count ratio.
+
+    Returns a dict with ``section_analysis``, ``overall_warnings``, and
+    ``revision_directives``.  Optionally writes ``draft_quality.json`` to
+    *stage_dir*.
+    """
+    from researchclaw.prompts import SECTION_WORD_TARGETS, _SECTION_TARGET_ALIASES
+
+    _heading_re = re.compile(r"^(#{1,4})\s+(.+)$", re.MULTILINE)
+    matches = list(_heading_re.finditer(draft))
+
+    sections_data: list[dict[str, Any]] = []
+    for i, m in enumerate(matches):
+        level = len(m.group(1))
+        heading = m.group(2).strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(draft)
+        body = draft[start:end].strip()
+        sections_data.append({
+            "heading": heading,
+            "heading_lower": heading.strip().lower(),
+            "level": level,
+            "body": body,
+        })
+
+    section_analysis: list[dict[str, Any]] = []
+    overall_warnings: list[str] = []
+    revision_directives: list[str] = []
+    main_section_words: dict[str, int] = {}
+
+    _bullet_re = re.compile(r"^\s*[-*]\s+", re.MULTILINE)
+    _numbered_re = re.compile(r"^\s*\d+\.\s+", re.MULTILINE)
+
+    for sec in sections_data:
+        if sec["level"] > 2:
+            continue
+        heading_lower: str = sec["heading_lower"]
+        body: str = sec["body"]
+        word_count = len(body.split())
+        canon = heading_lower
+        if canon not in SECTION_WORD_TARGETS:
+            canon = _SECTION_TARGET_ALIASES.get(heading_lower, "")
+        entry: dict[str, Any] = {
+            "heading": sec["heading"],
+            "word_count": word_count,
+            "canonical": canon,
+        }
+        if canon and canon in SECTION_WORD_TARGETS:
+            lo, hi = SECTION_WORD_TARGETS[canon]
+            entry["target"] = [lo, hi]
+            if word_count < int(lo * 0.7):
+                overall_warnings.append(
+                    f"{sec['heading']} is severely under target "
+                    f"({word_count} words, target {lo}-{hi})"
+                )
+                revision_directives.append(
+                    f"EXPAND {sec['heading']} from {word_count} to {lo}+ words. "
+                    f"Add substantive content \u2014 do NOT pad with filler."
+                )
+                entry["status"] = "severely_short"
+            elif word_count < lo:
+                overall_warnings.append(
+                    f"{sec['heading']} is under target "
+                    f"({word_count} words, target {lo}-{hi})"
+                )
+                revision_directives.append(
+                    f"Expand {sec['heading']} from {word_count} to {lo}+ words."
+                )
+                entry["status"] = "short"
+            elif word_count > int(hi * 1.3):
+                overall_warnings.append(
+                    f"{sec['heading']} exceeds target "
+                    f"({word_count} words, target {lo}-{hi})"
+                )
+                revision_directives.append(
+                    f"Compress {sec['heading']} from {word_count} to {hi} words or fewer."
+                )
+                entry["status"] = "long"
+            else:
+                entry["status"] = "ok"
+        if body:
+            total_lines = len([ln for ln in body.splitlines() if ln.strip()])
+            bullet_lines = len(_bullet_re.findall(body)) + len(_numbered_re.findall(body))
+            density = bullet_lines / total_lines if total_lines > 0 else 0.0
+            entry["bullet_density"] = round(density, 2)
+            threshold = 0.50 if heading_lower in _BULLET_LENIENT_SECTIONS else 0.25
+            if density > threshold and total_lines >= 4:
+                overall_warnings.append(
+                    f"{sec['heading']} has {bullet_lines}/{total_lines} "
+                    f"bullet/numbered lines ({density:.0%} density, "
+                    f"threshold {threshold:.0%})"
+                )
+                revision_directives.append(
+                    f"REWRITE {sec['heading']} as flowing academic prose. "
+                    f"Convert bullet points to narrative paragraphs."
+                )
+                entry["bullet_status"] = "high"
+            else:
+                entry["bullet_status"] = "ok"
+        canon_balance = canon or heading_lower
+        if canon_balance in _BALANCE_SECTIONS:
+            main_section_words[canon_balance] = word_count
+        section_analysis.append(entry)
+
+    if len(main_section_words) >= 2:
+        wc_values = list(main_section_words.values())
+        max_wc = max(wc_values)
+        min_wc = min(wc_values)
+        if min_wc > 0 and max_wc / min_wc > 3.0:
+            largest = max(main_section_words, key=main_section_words.get)  # type: ignore[arg-type]
+            smallest = min(main_section_words, key=main_section_words.get)  # type: ignore[arg-type]
+            overall_warnings.append(
+                f"Section imbalance: {largest} ({max_wc} words) vs "
+                f"{smallest} ({min_wc} words) \u2014 ratio {max_wc / min_wc:.1f}x"
+            )
+            revision_directives.append(
+                f"Rebalance sections: expand {smallest} and/or compress {largest} "
+                f"to achieve more even section lengths."
+            )
+
+    # --- C-4/C-5: Citation count and recency checks ---
+    _cite_pattern = re.compile(r"\[([a-zA-Z][a-zA-Z0-9_-]*\d{4}[a-zA-Z0-9]*)\]")
+    cited_keys = set(_cite_pattern.findall(draft))
+    if cited_keys:
+        n_citations = len(cited_keys)
+        if n_citations < 15:
+            overall_warnings.append(
+                f"Only {n_citations} unique citations found (target: >=15 for a full paper)"
+            )
+            revision_directives.append(
+                f"Add more references — a top-venue paper typically cites 25-40 works. "
+                f"Currently only {n_citations} unique citations."
+            )
+        # Check recency: count citations with year >= current_year - 2
+        _year_pat = re.compile(r"(\d{4})")
+        import datetime as _dt_cit
+        _cur_year = _dt_cit.datetime.now().year
+        recent_count = sum(
+            1 for k in cited_keys
+            for m in [_year_pat.search(k)]
+            if m and int(m.group(1)) >= _cur_year - 2
+        )
+        recency_ratio = recent_count / n_citations if n_citations > 0 else 0.0
+        if recency_ratio < 0.3 and n_citations >= 10:
+            overall_warnings.append(
+                f"Citation recency low: only {recent_count}/{n_citations} "
+                f"({recency_ratio:.0%}) from last 3 years (target: >=30%%)"
+            )
+
+    # --- Abstract and Conclusion length enforcement ---
+    for sec in sections_data:
+        hl = sec["heading_lower"]
+        body_text: str = sec["body"]
+        wc = len(body_text.split())
+        if hl == "abstract" and wc > 250:
+            overall_warnings.append(
+                f"Abstract is too long: {wc} words (target: 150-220 words)"
+            )
+            revision_directives.append(
+                f"COMPRESS the Abstract from {wc} to 150-220 words. "
+                f"Remove raw metric values, redundant context, and self-references."
+            )
+        if hl in ("conclusion", "conclusions", "conclusion and future work"):
+            if wc > 300:
+                overall_warnings.append(
+                    f"Conclusion is too long: {wc} words (target: 100-200 words)"
+                )
+                revision_directives.append(
+                    f"COMPRESS the Conclusion from {wc} to 100-200 words. "
+                    f"Do NOT repeat specific metric values from Results. "
+                    f"Summarize findings in 2-3 sentences, then 2-3 future directions."
+                )
+
+    # --- Raw metric path detection (log dumps in prose) ---
+    _raw_path_re = re.compile(
+        r"\\texttt\{[a-zA-Z0-9_/.-]+(?:/[a-zA-Z0-9_/.-]+){2,}",
+    )
+    raw_path_count = len(_raw_path_re.findall(draft))
+    if raw_path_count > 3:
+        overall_warnings.append(
+            f"Raw metric paths in prose: {raw_path_count} instances of "
+            f"\\texttt{{config/path/metric}} style dumps"
+        )
+        revision_directives.append(
+            "REMOVE raw experiment log paths from prose. Replace "
+            "\\texttt{config/metric/path} with human-readable metric names "
+            "and summarize values in tables, not inline text."
+        )
+
+    # --- Writing quality lint ---
+    _weasel_words = re.compile(
+        r"\b(various|many|several|quite|fairly|really|very|rather|"
+        r"somewhat|relatively|arguably|interestingly|importantly|"
+        r"it is well known that|it is obvious that|clearly)\b",
+        re.IGNORECASE,
+    )
+    _duplicate_words = re.compile(r"\b(\w+)\s+\1\b", re.IGNORECASE)
+    weasel_count = len(_weasel_words.findall(draft))
+    dup_matches = _duplicate_words.findall(draft)
+    dup_count = len([d for d in dup_matches if d.lower() not in ("that", "had")])
+    if weasel_count > 20:
+        overall_warnings.append(
+            f"High weasel-word count: {weasel_count} instances "
+            f"(consider replacing vague words with precise language)"
+        )
+        revision_directives.append(
+            "Replace vague hedging words (various, several, quite, fairly, "
+            "rather, somewhat) with precise quantities or remove them."
+        )
+    if dup_count > 0:
+        overall_warnings.append(
+            f"Duplicate adjacent words found: {dup_count} instance(s) "
+            f"(e.g., 'the the', 'is is')"
+        )
+        revision_directives.append(
+            "Fix duplicate adjacent words (likely typos)."
+        )
+
+    # --- AI-slop / boilerplate detection ---
+    _BOILERPLATE_PHRASES = [
+        "delves into", "delve into", "it is worth noting",
+        "it should be noted", "it is important to note",
+        "leverage the power of", "leverages the power of",
+        "in this paper, we propose", "in this work, we propose",
+        "to the best of our knowledge",
+        "in the realm of", "in the landscape of",
+        "plays a crucial role", "plays a pivotal role",
+        "groundbreaking", "cutting-edge", "state-of-the-art",
+        "game-changing", "paradigm shift",
+        "a myriad of", "a plethora of",
+        "aims to bridge the gap", "bridge the gap",
+        "shed light on", "sheds light on",
+        "pave the way", "paves the way",
+        "the advent of", "with the advent of",
+        "in recent years", "in recent times",
+        "has gained significant attention",
+        "has attracted considerable interest",
+        "has emerged as a promising",
+        "a comprehensive overview",
+        "a holistic approach", "holistic understanding",
+        "showcasing the efficacy", "demonstrate the efficacy",
+        "multifaceted", "underscores the importance",
+        "navigate the complexities",
+        "harness the potential", "harnessing the power",
+        "it is imperative to", "it is crucial to",
+        "a nuanced understanding", "nuanced approach",
+        "robust and scalable", "seamlessly integrates",
+        "the intricacies of", "intricate interplay",
+        "facilitate a deeper understanding",
+        "a testament to",
+    ]
+    draft_lower = draft.lower()
+    boilerplate_hits: list[str] = []
+    for phrase in _BOILERPLATE_PHRASES:
+        count = draft_lower.count(phrase)
+        if count > 0:
+            boilerplate_hits.extend([phrase] * count)
+    if len(boilerplate_hits) > 5:
+        unique_phrases = sorted(set(boilerplate_hits))[:5]
+        overall_warnings.append(
+            f"AI boilerplate detected: {len(boilerplate_hits)} instances "
+            f"of generic LLM phrases (e.g., {', '.join(repr(p) for p in unique_phrases[:3])})"
+        )
+        revision_directives.append(
+            "REWRITE sentences containing AI-generated boilerplate phrases. "
+            "Replace generic language (e.g., 'delves into', 'it is worth noting', "
+            "'leverages the power of', 'plays a crucial role', 'paves the way') "
+            "with precise, specific academic language."
+        )
+
+    # --- Related work depth check ---
+    _rw_headings = {"related work", "related works", "background", "literature review"}
+    rw_body = ""
+    for sec in sections_data:
+        if sec["heading_lower"] in _rw_headings and sec["level"] <= 2:
+            rw_body = sec["body"]
+            break
+    if rw_body and len(rw_body.split()) > 50:
+        _comparative_pats = re.compile(
+            r"\b(unlike|in contrast|whereas|while .+ focus|"
+            r"however|differ(?:s|ent)|our (?:method|approach) .+ instead|"
+            r"we (?:instead|differ)|compared to|as opposed to|"
+            r"goes beyond|extends|improves upon|addresses the limitation)\b",
+            re.IGNORECASE,
+        )
+        sentences = [s.strip() for s in re.split(r"[.!?]+", rw_body) if s.strip()]
+        comparative_sents = sum(1 for s in sentences if _comparative_pats.search(s))
+        ratio = comparative_sents / len(sentences) if sentences else 0.0
+        if ratio < 0.15 and len(sentences) >= 5:
+            overall_warnings.append(
+                f"Related Work is purely descriptive: only {comparative_sents}/{len(sentences)} "
+                f"sentences ({ratio:.0%}) contain comparative language (target: >=15%)"
+            )
+            revision_directives.append(
+                "REWRITE Related Work to critically compare with prior methods. "
+                "Use phrases like 'unlike X, our approach...', 'in contrast to...', "
+                "'while X focuses on... we address...' for at least 20% of sentences."
+            )
+
+    # --- Statistical rigor check (result sections) ---
+    _results_headings = {"results", "experiments", "experimental results", "evaluation"}
+    results_body = ""
+    for sec in sections_data:
+        if sec["heading_lower"] in _results_headings and sec["level"] <= 2:
+            results_body += sec["body"] + "\n"
+    if results_body and len(results_body.split()) > 100:
+        has_std = bool(re.search(r"±|\\pm|\bstd\b|\\std\b|standard deviation", results_body, re.IGNORECASE))
+        has_ci = bool(re.search(r"confidence interval|\bCI\b|95%|p-value|p\s*<", results_body, re.IGNORECASE))
+        has_seeds = bool(re.search(r"(?:seed|run|trial)s?\s*[:=]\s*\d|averaged?\s+over\s+\d+\s+(?:seed|run|trial)", results_body, re.IGNORECASE))
+        if not has_std and not has_ci and not has_seeds:
+            overall_warnings.append(
+                "No statistical measures found in results (no std, CI, p-values, or multi-seed reporting)"
+            )
+            revision_directives.append(
+                "ADD error bars (±std), confidence intervals, or note the number of "
+                "random seeds used. Single-run results without variance reporting "
+                "are insufficient for top venues."
+            )
+
+    result: dict[str, Any] = {
+        "section_analysis": section_analysis,
+        "overall_warnings": overall_warnings,
+        "revision_directives": revision_directives,
+    }
+    if stage_dir is not None:
+        (stage_dir / "draft_quality.json").write_text(
+            json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        if overall_warnings:
+            logger.warning(
+                "Draft quality: %d warning(s) \u2014 %s",
+                len(overall_warnings),
+                "; ".join(overall_warnings[:3]),
+            )
+        else:
+            logger.info("Draft quality: all checks passed")
+    return result
+
+
+def _review_compiled_pdf(
+    pdf_path: Path,
+    llm: LLMClient,
+    topic: str,
+) -> dict[str, Any]:
+    """Multi-dimensional LLM review of compiled paper (AI-Scientist style).
+
+    Scores the paper on 7 academic review dimensions (1-10 each),
+    identifies specific strengths/weaknesses, and provides an overall
+    accept/reject recommendation with confidence.
+
+    Returns a dict with dimensional scores, issues, and decision.
+    """
+    if not pdf_path.exists():
+        return {}
+
+    # Use source-based review since not all models support vision
+    tex_path = pdf_path.with_suffix(".tex")
+    if not tex_path.exists():
+        return {}
+
+    tex_content = tex_path.read_text(encoding="utf-8")[:12000]
+
+    review_prompt = (
+        "You are a senior Area Chair at a top AI conference (NeurIPS/ICML/ICLR) "
+        "reviewing a paper submission. Provide a rigorous, structured review.\n\n"
+        f"PAPER TOPIC: {topic}\n\n"
+        f"LaTeX source:\n```latex\n{tex_content}\n```\n\n"
+        "REVIEW INSTRUCTIONS:\n"
+        "Score each dimension 1-10 (1=unacceptable, 5=borderline, 8=strong accept, "
+        "10=best paper candidate). Be critical but fair.\n\n"
+        "DIMENSIONS:\n"
+        "1. SOUNDNESS: Are claims well-supported? Is methodology correct? "
+        "Are there logical gaps or unsupported claims?\n"
+        "2. PRESENTATION: Is the writing clear, flowing, and professional? "
+        "Are there grammar errors, bullet lists in prose sections, or "
+        "boilerplate phrases? Is it free of AI-generated slop?\n"
+        "3. CONTRIBUTION: Is the contribution significant? Does it advance "
+        "the field beyond incremental improvement?\n"
+        "4. ORIGINALITY: Is the approach novel? Does it differentiate clearly "
+        "from prior work?\n"
+        "5. CLARITY: Are the method and results easy to understand? Are figures "
+        "and tables well-designed with descriptive captions?\n"
+        "6. SIGNIFICANCE: Would the community benefit from this work? Does it "
+        "open new research directions?\n"
+        "7. REPRODUCIBILITY: Are experimental details sufficient to reproduce "
+        "results? Are hyperparameters, datasets, and metrics clearly stated?\n\n"
+        "Also evaluate:\n"
+        "- Are all figures referenced in the text?\n"
+        "- Are tables properly formatted (booktabs style, no vertical rules)?\n"
+        "- Does the related work critically compare, not just list papers?\n"
+        "- Are statistical measures (std, CI, multiple seeds) reported?\n"
+        "- Is there a clear limitations section?\n\n"
+        "Return a JSON object:\n"
+        "{\n"
+        '  "soundness": N,\n'
+        '  "presentation": N,\n'
+        '  "contribution": N,\n'
+        '  "originality": N,\n'
+        '  "clarity": N,\n'
+        '  "significance": N,\n'
+        '  "reproducibility": N,\n'
+        '  "overall_score": N,\n'
+        '  "confidence": N,\n'
+        '  "decision": "accept" or "reject",\n'
+        '  "strengths": ["strength1", "strength2", ...],\n'
+        '  "weaknesses": ["weakness1", "weakness2", ...],\n'
+        '  "critical_issues": ["issue requiring revision", ...],\n'
+        '  "minor_issues": ["formatting/typo issues", ...],\n'
+        '  "summary": "2-3 sentence overall assessment"\n'
+        "}\n"
+    )
+
+    try:
+        resp = llm.chat(
+            messages=[{"role": "user", "content": review_prompt}],
+            system=(
+                "You are a meticulous, critical academic reviewer. "
+                "You have reviewed 100+ papers at top venues. "
+                "Score honestly — most papers deserve 4-6, not 7-9. "
+                "Flag any sign of AI-generated boilerplate."
+            ),
+        )
+        review_data = _safe_json_loads(resp.content, {})
+        if isinstance(review_data, dict) and "overall_score" in review_data:
+            # Compute weighted aggregate if individual scores present
+            dim_scores = {
+                k: review_data.get(k, 0)
+                for k in (
+                    "soundness", "presentation", "contribution",
+                    "originality", "clarity", "significance",
+                    "reproducibility",
+                )
+            }
+            valid = {k: v for k, v in dim_scores.items() if isinstance(v, (int, float)) and v > 0}
+            if valid:
+                review_data["mean_score"] = round(sum(valid.values()) / len(valid), 2)
+            return review_data
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("PDF review LLM call failed: %s", exc)
+
+    return {}
+
+
 def _check_ablation_effectiveness(
     exp_summary: dict[str, Any],
     threshold: float = 0.05,
@@ -4820,13 +5625,15 @@ def _check_ablation_effectiveness(
     """
     warnings: list[str] = []
     cond_summaries = exp_summary.get("condition_summaries", {})
-    if not cond_summaries:
+    if not isinstance(cond_summaries, dict) or not cond_summaries:
         return warnings
 
     # Find baseline/control condition
     baseline_name = None
     baseline_mean = None
     for name, data in cond_summaries.items():
+        if not isinstance(data, dict):
+            continue
         name_lower = name.lower()
         if any(tag in name_lower for tag in ("baseline", "control", "vanilla", "standard")):
             metrics = data.get("metrics", {})
@@ -4852,6 +5659,8 @@ def _check_ablation_effectiveness(
 
     # Check each ablation condition
     for name, data in cond_summaries.items():
+        if not isinstance(data, dict):
+            continue
         name_lower = name.lower()
         if name == baseline_name:
             continue
@@ -4889,12 +5698,14 @@ def _detect_result_contradictions(
     """
     advisories: list[str] = []
     cond_summaries = exp_summary.get("condition_summaries", {})
-    if not cond_summaries:
+    if not isinstance(cond_summaries, dict) or not cond_summaries:
         return advisories
 
     # Collect primary metric means per condition
     means: dict[str, float] = {}
     for name, data in cond_summaries.items():
+        if not isinstance(data, dict):
+            continue
         metrics = data.get("metrics", {})
         for mk, mv in metrics.items():
             if mk.endswith("_mean"):
@@ -5034,10 +5845,12 @@ def _execute_paper_draft(
 
             # R19-6 + R33: Inject condition summaries with CIs
             cond_summaries = exp_summary_parsed.get("condition_summaries", {})
-            if cond_summaries:
+            if isinstance(cond_summaries, dict) and cond_summaries:
                 cond_block = "\n\n## PER-CONDITION SUMMARY (use in Results tables)\n"
                 for cname, cdata in sorted(cond_summaries.items()):
                     cond_block += f"\n### {cname}\n"
+                    if not isinstance(cdata, dict):
+                        continue
                     sr = cdata.get("success_rate")
                     if sr is not None:
                         cond_block += f"- Success rate: {sr:.1%}\n"
@@ -5060,6 +5873,8 @@ def _execute_paper_draft(
                 paired_block = "\n\n## PAIRED STATISTICAL COMPARISONS (use these in Results)\n"
                 paired_block += f"Total: {len(paired)} paired tests computed.\n"
                 for pc in paired:
+                    if not isinstance(pc, dict):
+                        continue
                     method = pc.get("method", "?")
                     baseline = pc.get("baseline", "?")
                     regime = pc.get("regime", "all")
@@ -5078,7 +5893,7 @@ def _execute_paper_draft(
                 exp_metrics_instruction += paired_block
 
             # R24: Method naming map — translate generic condition labels
-            _cond_names = list(cond_summaries.keys()) if cond_summaries else []
+            _cond_names = list(cond_summaries.keys()) if isinstance(cond_summaries, dict) and cond_summaries else []
             if _cond_names:
                 naming_block = (
                     "\n\n## METHOD NAMING (CRITICAL — do NOT use generic labels in the paper)\n"
@@ -5122,7 +5937,7 @@ def _execute_paper_draft(
                     "| Comparison | Mean Diff | Std Diff | t-statistic | p-value | Significance |\n"
                     "Use the PAIRED STATISTICAL COMPARISONS data above to fill this table.\n"
                     "Mark significance: *** (p<0.001), ** (p<0.01), * (p<0.05), n.s.\n"
-                    "This is non-negotiable — a NeurIPS paper MUST have statistical tests.\n"
+                    "This is non-negotiable — a top-venue paper MUST have statistical tests.\n"
                 )
                 exp_metrics_instruction += stat_table_block
 
@@ -5223,25 +6038,37 @@ def _execute_paper_draft(
             evidence_refs=(),
         )
 
-    # R4-2: HARD BLOCK — refuse to write paper with no real data
+    # R4-2: HARD BLOCK — refuse to write paper with no real data (ML/empirical domains)
+    # For non-empirical domains (math proofs, theoretical economics), allow proceeding
+    _domain_id, _domain_name, _domain_venues = _detect_domain(
+        config.research.topic, config.research.domains
+    )
+    _empirical_domains = {"ml", "engineering", "biology", "chemistry"}
     if not has_real_metrics:
-        logger.error(
-            "BLOCKED: Cannot write paper — experiment produced NO metrics. "
-            "The pipeline will not fabricate results."
-        )
-        (stage_dir / "paper_draft.md").write_text(
-            "# Paper Draft Blocked\n\n"
-            "**Reason**: Experiment stage produced no metrics (status: failed/timeout). "
-            "Cannot write a paper without real experimental data.\n\n"
-            "**Action Required**: Fix experiment execution or increase time_budget_sec.",
-            encoding="utf-8",
-        )
-        return StageResult(
-            stage=Stage.PAPER_DRAFT,
-            status=StageStatus.FAILED,
-            artifacts=("paper_draft.md",),
-            evidence_refs=(),
-        )
+        if _domain_id in _empirical_domains:
+            logger.error(
+                "BLOCKED: Cannot write paper — experiment produced NO metrics. "
+                "The pipeline will not fabricate results."
+            )
+            (stage_dir / "paper_draft.md").write_text(
+                "# Paper Draft Blocked\n\n"
+                "**Reason**: Experiment stage produced no metrics (status: failed/timeout). "
+                "Cannot write a paper without real experimental data.\n\n"
+                "**Action Required**: Fix experiment execution or increase time_budget_sec.",
+                encoding="utf-8",
+            )
+            return StageResult(
+                stage=Stage.PAPER_DRAFT,
+                status=StageStatus.FAILED,
+                artifacts=("paper_draft.md",),
+                evidence_refs=(),
+            )
+        else:
+            logger.warning(
+                "No experiment metrics found, but domain '%s' may be non-empirical "
+                "(theoretical/mathematical). Proceeding with paper draft.",
+                _domain_name,
+            )
 
     # R11-5: Experiment quality minimum threshold before paper writing
     # Parse analysis.md for quality rating and condition completeness
@@ -5324,17 +6151,42 @@ def _execute_paper_draft(
 
     # IMP-6 + FA: Inject chart references into paper draft prompt
     # Prefer FigureAgent's figure_plan.json (rich descriptions) over raw file scan
+    # BUG-FIX: figure_plan.json may be a list (from FigureAgent planner) or a dict
+    # (from executor overwrite).  The orchestrator writes a list at planning time;
+    # the executor overwrites with a dict only when figure_count > 0.  If the
+    # FigureAgent renders 0 charts the list persists, and calling .get() on it
+    # raises AttributeError.
     _fa_descriptions = ""
     for _s14_dir in sorted(run_dir.glob("stage-14*")):
-        _fp_path = _s14_dir / "figure_plan.json"
-        if _fp_path.exists():
+        # Prefer the final plan (dict with figure_descriptions) if it exists
+        for _fp_name in ("figure_plan_final.json", "figure_plan.json"):
+            _fp_path = _s14_dir / _fp_name
+            if not _fp_path.exists():
+                continue
             try:
                 _fp_data = json.loads(_fp_path.read_text(encoding="utf-8"))
-                _fa_descriptions = _fp_data.get("figure_descriptions", "")
+                if isinstance(_fp_data, dict):
+                    _fa_descriptions = _fp_data.get("figure_descriptions", "")
+                elif isinstance(_fp_data, list) and _fp_data:
+                    # List format from FigureAgent planner — synthesize descriptions
+                    _desc_parts = ["## PLANNED FIGURES (from figure plan)\n"]
+                    for _fig in _fp_data:
+                        if isinstance(_fig, dict):
+                            _fid = _fig.get("figure_id", "unnamed")
+                            _ftitle = _fig.get("title", "")
+                            _fcap = _fig.get("caption", "")
+                            _fsec = _fig.get("section", "results")
+                            _desc_parts.append(
+                                f"- **{_fid}** ({_fsec}): {_ftitle}\n  {_fcap}"
+                            )
+                    if len(_desc_parts) > 1:
+                        _fa_descriptions = "\n".join(_desc_parts)
             except (json.JSONDecodeError, OSError):
                 pass
             if _fa_descriptions:
                 break
+        if _fa_descriptions:
+            break
 
     if _fa_descriptions:
         exp_metrics_instruction += "\n\n" + _fa_descriptions
@@ -5563,6 +6415,10 @@ Template references.
 Generated: {_utcnow_iso()}
 """
     (stage_dir / "paper_draft.md").write_text(draft, encoding="utf-8")
+
+    # Validate draft quality (section balance + bullet density)
+    _validate_draft_quality(draft, stage_dir=stage_dir)
+
     return StageResult(
         stage=Stage.PAPER_DRAFT,
         status=StageStatus.DONE,
@@ -5652,6 +6508,23 @@ def _execute_peer_review(
 ) -> StageResult:
     draft = _read_prior_artifact(run_dir, "paper_draft.md") or ""
     experiment_evidence = _collect_experiment_evidence(run_dir)
+
+    # Load draft quality warnings from Stage 17 (if available)
+    _quality_suffix = ""
+    _quality_json_path = _find_prior_file(run_dir, "draft_quality.json")
+    if _quality_json_path and _quality_json_path.exists():
+        try:
+            _dq = json.loads(_quality_json_path.read_text(encoding="utf-8"))
+            _dq_warnings = _dq.get("overall_warnings", [])
+            if _dq_warnings:
+                _quality_suffix = (
+                    "\n\nAUTOMATED QUALITY ISSUES (flag these in your review):\n"
+                    + "\n".join(f"- {w}" for w in _dq_warnings)
+                    + "\n"
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
     if llm is not None:
         _pm = prompts or PromptManager()
         sp = _pm.for_stage(
@@ -5660,10 +6533,11 @@ def _execute_peer_review(
             draft=draft,
             experiment_evidence=experiment_evidence,
         )
+        _review_user = sp.user + _quality_suffix
         resp = _chat_with_prompt(
             llm,
             sp.system,
-            sp.user,
+            _review_user,
             json_mode=sp.json_mode,
             max_tokens=sp.max_tokens,
         )
@@ -5729,12 +6603,28 @@ def _execute_paper_revision(
                 _rev_blocks[_bname] = _pm.block(_bname)
             except (KeyError, Exception):  # noqa: BLE001
                 _rev_blocks[_bname] = ""
+        # Load draft quality directives from Stage 17
+        _quality_prefix = ""
+        _quality_json_path = _find_prior_file(run_dir, "draft_quality.json")
+        if _quality_json_path and _quality_json_path.exists():
+            try:
+                _dq = json.loads(_quality_json_path.read_text(encoding="utf-8"))
+                _dq_directives = _dq.get("revision_directives", [])
+                if _dq_directives:
+                    _quality_prefix = (
+                        "MANDATORY QUALITY FIXES (address ALL of these):\n"
+                        + "\n".join(f"- {d}" for d in _dq_directives)
+                        + "\n\n"
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+
         sp = _pm.for_stage(
             "paper_revision",
             topic_constraint=_pm.block("topic_constraint", topic=config.research.topic),
             writing_structure=_ws_revision,
             draft=draft,
-            reviews=reviews + data_integrity_revision,
+            reviews=_quality_prefix + reviews + data_integrity_revision,
             **_rev_blocks,
         )
         # R10-Fix2: Ensure max_tokens is sufficient for full paper revision
@@ -5809,14 +6699,13 @@ def _execute_paper_revision(
                     else revised
                 )
                 if revision_summary.strip():
-                    revised = draft + "\n\n## Appendix: Revision Notes (Auto-generated)\n\n" + revision_summary
-                else:
-                    revised = draft
+                    # Save revision notes to internal file, not paper body
+                    (stage_dir / "revision_notes_internal.md").write_text(
+                        revision_summary, encoding="utf-8"
+                    )
+                revised = draft
     else:
-        revised = (
-            draft
-            + "\n\n## Revision Notes\n- Addressed reviewer concerns in experiments and limitations.\n"
-        )
+        revised = draft
     (stage_dir / "paper_revised.md").write_text(revised, encoding="utf-8")
     return StageResult(
         stage=Stage.PAPER_REVISION,
@@ -5891,7 +6780,7 @@ def _execute_knowledge_archive(
             preamble=preamble,
             decision=decision,
             analysis=analysis,
-            revised=revised[:5000],
+            revised=revised[:15000],
         )
         resp = _chat_with_prompt(
             llm,
@@ -5962,6 +6851,13 @@ def _execute_export_publish(
             max_tokens=sp.max_tokens,
         )
         final_paper = resp.content
+        # Content guard: reject LLM output that truncates the paper
+        if revised and len(final_paper) < 0.6 * len(revised):
+            logger.warning(
+                "Stage 22: LLM output is %.0f%% of input length — using original",
+                100 * len(final_paper) / max(len(revised), 1),
+            )
+            final_paper = revised
     else:
         final_paper = revised
     if not final_paper.strip():
@@ -6067,7 +6963,7 @@ def _execute_export_publish(
                 artifacts.append("invalid_citations.json")
 
         if valid_keys:
-            _CITE_KEY_PAT = r"[a-z]+\d{4}[a-z]*"
+            _CITE_KEY_PAT = r"[a-zA-Z][a-zA-Z0-9_-]*\d{4}[a-zA-Z0-9]*"
 
             # Step 1: Convert multi-key brackets [key1, key2] → \cite{key1, key2}
             def _replace_multi_cite(m: _re.Match[str]) -> str:
@@ -6151,6 +7047,16 @@ def _execute_export_publish(
         tpl = get_template(config.export.target_conference)
         # Use the latex-citation-processed version if available
         tex_source = locals().get("final_paper_latex", final_paper)
+        # Append NeurIPS-style checklist if target is a ML conference
+        if tpl.name in ("neurips_2024", "neurips_2025", "icml_2025", "icml_2026",
+                         "iclr_2025", "iclr_2026"):
+            _has_exp = bool(_read_prior_artifact(run_dir, "experiment_summary.json"))
+            _checklist = _generate_neurips_checklist(
+                has_experiments=_has_exp,
+                has_code=True,
+            )
+            if "NeurIPS Paper Checklist" not in tex_source:
+                tex_source = tex_source.rstrip() + "\n\n" + _checklist
         tex_content = markdown_to_latex(
             tex_source,
             tpl,
@@ -6165,6 +7071,83 @@ def _execute_export_publish(
             tpl.display_name,
             len(tex_content),
         )
+        # Copy bundled style files alongside paper.tex
+        for sf in tpl.get_style_files():
+            import shutil as _shutil_sty
+            _shutil_sty.copy2(sf, stage_dir / sf.name)
+        # Compile verification
+        try:
+            from researchclaw.templates.compiler import compile_latex
+            _compile_result = compile_latex(stage_dir / "paper.tex", max_attempts=2)
+            if _compile_result.success:
+                logger.info("Stage 22: LaTeX compilation verification PASSED")
+                artifacts.append("paper.pdf")
+                # PDF-as-reviewer: LLM-based visual review of compiled PDF
+                _pdf_path = stage_dir / "paper.pdf"
+                if _pdf_path.exists() and llm is not None:
+                    try:
+                        _pdf_review = _review_compiled_pdf(
+                            _pdf_path, llm, config.research.topic
+                        )
+                        if _pdf_review:
+                            (stage_dir / "pdf_review.json").write_text(
+                                json.dumps(_pdf_review, indent=2, ensure_ascii=False),
+                                encoding="utf-8",
+                            )
+                            artifacts.append("pdf_review.json")
+                            _pdf_score = _pdf_review.get("overall_score", 0)
+                            if _pdf_score < 5:
+                                logger.warning(
+                                    "Stage 22: PDF visual review score %d/10 — %s",
+                                    _pdf_score,
+                                    _pdf_review.get("summary", ""),
+                                )
+                            else:
+                                logger.info(
+                                    "Stage 22: PDF visual review score %d/10",
+                                    _pdf_score,
+                                )
+                    except Exception as _pdf_exc:  # noqa: BLE001
+                        logger.debug("Stage 22: PDF review skipped: %s", _pdf_exc)
+                # Post-compilation quality checks
+                try:
+                    from researchclaw.templates.compiler import check_compiled_quality
+                    _qc = check_compiled_quality(stage_dir / "paper.tex")
+                    if _qc.warnings_summary:
+                        logger.warning(
+                            "Stage 22: Quality checks: %s",
+                            "; ".join(_qc.warnings_summary),
+                        )
+                    (stage_dir / "compilation_quality.json").write_text(
+                        json.dumps({
+                            "page_count": _qc.page_count,
+                            "unresolved_refs": _qc.unresolved_refs,
+                            "unresolved_cites": _qc.unresolved_cites,
+                            "overfull_hboxes": len(_qc.overfull_hboxes),
+                            "orphan_figures": _qc.orphan_figures,
+                            "orphan_labels": _qc.orphan_labels,
+                            "warnings": _qc.warnings_summary,
+                        }, indent=2),
+                        encoding="utf-8",
+                    )
+                    artifacts.append("compilation_quality.json")
+                except Exception as _qc_exc:  # noqa: BLE001
+                    logger.debug("Stage 22: Quality checks skipped: %s", _qc_exc)
+            else:
+                logger.warning("Stage 22: LaTeX compilation verification FAILED: %s", _compile_result.errors[:3])
+                # Add compilation failure comment to .tex
+                _tex_path = stage_dir / "paper.tex"
+                if _tex_path.exists():
+                    _tex_content = _tex_path.read_text(encoding="utf-8")
+                    if "% WARNING: Compilation failed" not in _tex_content:
+                        _tex_content = (
+                            "% WARNING: Compilation failed. Errors:\n"
+                            + "".join(f"% {e}\n" for e in _compile_result.errors[:5])
+                            + _tex_content
+                        )
+                        _tex_path.write_text(_tex_content, encoding="utf-8")
+        except Exception as _compile_exc:  # noqa: BLE001
+            logger.debug("Stage 22: Compile verification skipped: %s", _compile_exc)
     except Exception as exc:  # noqa: BLE001
         logger.warning("LaTeX generation skipped: %s", exc)
 
@@ -6385,40 +7368,48 @@ def _check_citation_relevance(
     """Use LLM to assess relevance of each citation to the research topic.
 
     Returns a dict mapping cite_key → relevance score (0.0–1.0).
+    Processes citations in batches of 30 to handle large bibliographies.
     """
-    # Build a batch prompt for efficiency
     citation_lines = []
     for cr in results:
         citation_lines.append(f"- [{cr.cite_key}] \"{cr.title}\"")
     if not citation_lines:
         return {}
 
-    citations_text = "\n".join(citation_lines[:30])  # Cap at 30
+    all_scores: dict[str, float] = {}
+    _BATCH_SIZE = 30
 
-    prompt = (
-        f"Research topic: {topic}\n\n"
-        f"Rate the relevance of each citation to the research topic on a scale of 0.0 to 1.0.\n"
-        f"Return ONLY a JSON object mapping cite_key to relevance score.\n"
-        f"Example: {{\"smith2020\": 0.9, \"jones2019\": 0.2}}\n\n"
-        f"Citations:\n{citations_text}"
-    )
+    for batch_start in range(0, len(citation_lines), _BATCH_SIZE):
+        batch = citation_lines[batch_start:batch_start + _BATCH_SIZE]
+        citations_text = "\n".join(batch)
 
-    try:
-        resp = llm.chat(
-            [{"role": "user", "content": prompt}],
-            system="You assess citation relevance. Return only valid JSON.",
-            json_mode=True,
+        prompt = (
+            f"Research topic: {topic}\n\n"
+            f"Rate the relevance of each citation to the research topic "
+            f"on a scale of 0.0 to 1.0.\n"
+            f"Return ONLY a JSON object mapping cite_key to relevance score.\n"
+            f"Example: {{\"smith2020\": 0.9, \"jones2019\": 0.2}}\n\n"
+            f"Citations:\n{citations_text}"
         )
-        parsed = _safe_json_loads(resp.content, {})
-        if isinstance(parsed, dict):
-            return {
-                k: max(0.0, min(1.0, float(v)))
-                for k, v in parsed.items()
-                if isinstance(v, (int, float))
-            }
-    except Exception:  # noqa: BLE001
-        logger.debug("Citation relevance check failed, skipping")
-    return {}
+
+        try:
+            resp = llm.chat(
+                [{"role": "user", "content": prompt}],
+                system="You assess citation relevance. Return only valid JSON.",
+                json_mode=True,
+            )
+            parsed = _safe_json_loads(resp.content, {})
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    if isinstance(v, (int, float)):
+                        all_scores[k] = max(0.0, min(1.0, float(v)))
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "Citation relevance check failed for batch %d–%d, skipping",
+                batch_start, batch_start + len(batch),
+            )
+
+    return all_scores
 
 
 def _remove_bibtex_entries(bib_text: str, keys_to_remove: set[str]) -> str:
@@ -6549,13 +7540,19 @@ def _execute_citation_verify(
             low_relevance_keys.add(cr.cite_key)
 
     # Hard cap: if still above MAX_CITATIONS after relevance filter, drop lowest
+    # BUG-07 fix: Unscored citations (relevance_score=None) default to 0.7
+    # because they passed API verification and are likely relevant.
+    # Previously they defaulted to 0.0 which caused mass-deletion.
+    _DEFAULT_RELEVANCE = 0.7
     remaining = [
         cr for cr in report.results
         if cr.cite_key not in low_relevance_keys
         and cr.status != VerifyStatus.HALLUCINATED
     ]
     if len(remaining) > MAX_CITATIONS:
-        remaining.sort(key=lambda c: c.relevance_score or 0.0)
+        remaining.sort(
+            key=lambda c: c.relevance_score if c.relevance_score is not None else _DEFAULT_RELEVANCE,
+        )
         overflow = remaining[:len(remaining) - MAX_CITATIONS]
         for cr in overflow:
             low_relevance_keys.add(cr.cite_key)
@@ -6761,9 +7758,7 @@ def execute_stage(
                     )
                     break
 
-    if result.status == StageStatus.DONE and gate_required(
-        stage, config.security.hitl_required_stages
-    ):
+    if result.status == StageStatus.DONE and gate_required(stage, config.security.hitl_required_stages):
         if auto_approve_gates:
             if bridge.use_memory:
                 adapters.memory.append("gates", f"{run_id}:{int(stage)}:auto-approved")

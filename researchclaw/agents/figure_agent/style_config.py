@@ -27,9 +27,9 @@ DPI_DRAFT = 150
 FONT_SIZE = {
     "title": 12,
     "axis_label": 10,
-    "tick": 8,
+    "tick": 9,
     "legend": 9,
-    "annotation": 8,
+    "annotation": 9,
 }
 
 # ---------------------------------------------------------------------------

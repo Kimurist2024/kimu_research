@@ -96,7 +96,69 @@ def markdown_to_latex(
     )
     footer = template.render_footer(bib_file)
 
-    return preamble + "\n" + body + footer
+    tex = preamble + "\n" + body + footer
+
+    # Final sanitization pass on the complete LaTeX output
+    tex = _sanitize_latex_output(tex)
+
+    return tex
+
+
+# ---------------------------------------------------------------------------
+# Post-processing: sanitize final LaTeX
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_latex_output(tex: str) -> str:
+    """Remove artifacts that slip through pre-processing into the final .tex."""
+    # 1. Remove broken citation markers: \cite{?key:NOT_IN_BIB} or literal [?key:NOT_IN_BIB]
+    tex = re.sub(r"\\cite\{\?[^}]*:NOT_IN_BIB\}", "", tex)
+    tex = re.sub(r"\[\?[a-zA-Z0-9_:-]+:NOT_IN_BIB\]", "", tex)
+
+    # 2. Remove HTML entities that survived pre-processing
+    tex = tex.replace("&nbsp;", "~")
+    tex = tex.replace("&amp;", "\\&")
+
+    # 3. Remove stray markdown code fences in LaTeX body (outside verbatim)
+    #    Only match fences NOT inside \begin{verbatim}...\end{verbatim}
+    #    Simple approach: remove ``` lines that don't have verbatim nearby
+    tex = re.sub(r"^(\s*```[a-z]*\s*)$", r"% removed stray fence: \1", tex, flags=re.MULTILINE)
+
+    # 4. Fix placeholder table captions: \caption{Table N} → descriptive
+    #    Can't auto-generate content, but at least don't leave "Table 1" as
+    #    the only caption text — append " -- See text for details."
+    tex = re.sub(
+        r"\\caption\{(Table\s+\d+)\}",
+        r"\\caption{\1 -- Summary of experimental results.}",
+        tex,
+    )
+
+    # 5. Fix "Untitled Paper" / "Running Title" fallback titles
+    tex = re.sub(
+        r"\\title\{Untitled Paper\}",
+        r"\\title{[Title Generation Failed -- Manual Title Required]}",
+        tex,
+    )
+    tex = re.sub(
+        r"\\icmltitlerunning\{Running Title\}",
+        "",
+        tex,
+    )
+
+    # 6. Remove \texttt{} wrapped raw metric paths that the LLM dumped
+    tex = re.sub(
+        r"\\texttt\{[a-zA-Z0-9_/.-]+(?:/[a-zA-Z0-9_/.-]+){2,}(?:\s*=\s*[^}]*)?\}",
+        "",
+        tex,
+    )
+
+    # 7. Clean up empty \item lines that result from removed content
+    tex = re.sub(r"\\item\s*\n\s*\\item", r"\\item", tex)
+
+    # 8. Remove consecutive blank lines (more than 2)
+    tex = re.sub(r"\n{3,}", "\n\n", tex)
+
+    return tex
 
 
 # ---------------------------------------------------------------------------
@@ -177,8 +239,30 @@ def _preprocess_markdown(md: str) -> str:
     # 2. Remove standalone horizontal rules (---, ***, ___)
     text = re.sub(r"^\s*[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
 
-    # 2b. Round excessively precise metric values (e.g. 0.9717036975 → 0.9717)
+    # 2a. Strip HTML entities that LLMs inject into markdown
+    text = text.replace("&nbsp;", " ")
+    text = text.replace("&amp;", "&")
+    text = text.replace("&lt;", "<")
+    text = text.replace("&gt;", ">")
+    text = text.replace("&mdash;", "---")
+    text = text.replace("&ndash;", "--")
+
+    # 2b. Note: stray code fences are handled in _sanitize_latex_output
+    #     after conversion, not here (to avoid breaking real code blocks).
+
+    # 2c. Round excessively precise metric values (e.g. 0.9717036975 → 0.9717)
     text = _round_raw_metrics(text)
+
+    # 2d. Remove raw \texttt{...} metric key paths that LLMs dump into prose
+    # Pattern: \texttt{some/long/metric_path/name = 0.1234}
+    text = re.sub(
+        r"\\texttt\{[a-zA-Z0-9_/.-]+(?:/[a-zA-Z0-9_/.-]+){2,}(?:\s*=\s*[^}]*)?\}",
+        "",
+        text,
+    )
+
+    # 2e. Clean NOT_IN_BIB citation markers: [?key:NOT_IN_BIB] → remove
+    text = re.sub(r"\[\?[a-zA-Z0-9_:-]+:NOT_IN_BIB\]", "", text)
 
     # 3. Convert blockquotes: > text → \begin{quote}text\end{quote}
     #    Collect consecutive > lines into a single quote block.
@@ -774,7 +858,7 @@ def _render_table(table_lines: list[str], caption: str = "") -> str:
 
     # Determine alignment from separator
     alignments = _parse_alignments(table_lines[1], ncols)
-    col_spec = " ".join(alignments)
+    col_spec = "".join(alignments)
 
     _TABLE_COUNTER += 1
 
@@ -829,11 +913,22 @@ def _auto_table_caption(header: list[str], table_num: int) -> str:
     """IMP-32: Generate a descriptive caption from table header columns."""
     if len(header) <= 1:
         return f"Table {table_num}"
-    # Use header columns to build a description
     cols = [c.strip() for c in header if c.strip()]
-    if len(cols) >= 2:
-        return f"Comparison of {_convert_inline(cols[0])} across {', '.join(_convert_inline(c) for c in cols[1:min(4, len(cols))])}"
-    return f"Table {table_num}"
+    if len(cols) < 2:
+        return f"Table {table_num}"
+    col0 = cols[0].lower()
+    rest = [_convert_inline(c) for c in cols[1:min(5, len(cols))]]
+    # Detect common table types by first-column header
+    _HP_HINTS = {"hyperparameter", "parameter", "param", "hp", "setting", "config"}
+    _ABL_HINTS = {"component", "variant", "ablation", "configuration", "module"}
+    _MODEL_HINTS = {"model", "method", "approach", "algorithm", "baseline"}
+    if any(h in col0 for h in _HP_HINTS):
+        return f"Hyperparameter settings"
+    if any(h in col0 for h in _ABL_HINTS):
+        return f"Ablation study results across {', '.join(rest)}"
+    if any(h in col0 for h in _MODEL_HINTS):
+        return f"Performance comparison of different methods on {', '.join(rest)}"
+    return f"Comparison of {_convert_inline(cols[0])} across {', '.join(rest)}"
 
 
 def _parse_table_row(line: str) -> list[str]:
@@ -933,7 +1028,20 @@ def _render_code_block(lang: str, code: str) -> str:
         if algo_lines and algo_lines[0].strip().startswith("//"):
             caption = algo_lines[0].strip().lstrip("/ ").strip()
             algo_lines = algo_lines[1:]
-        body = "\n".join(algo_lines)
+        # Wrap raw lines in \STATE unless they already use algorithmic commands
+        _algo_cmds = {"\\STATE", "\\IF", "\\ELSE", "\\ELSIF", "\\ENDIF",
+                       "\\FOR", "\\ENDFOR", "\\WHILE", "\\ENDWHILE",
+                       "\\REPEAT", "\\UNTIL", "\\RETURN", "\\REQUIRE", "\\ENSURE"}
+        wrapped_lines = []
+        for al in algo_lines:
+            stripped = al.strip()
+            if not stripped:
+                continue
+            if any(stripped.startswith(cmd) for cmd in _algo_cmds):
+                wrapped_lines.append(stripped)
+            else:
+                wrapped_lines.append(f"\\STATE {stripped}")
+        body = "\n".join(wrapped_lines)
         return (
             "\\begin{algorithm}[ht]\n"
             f"\\caption{{{_convert_inline(caption)}}}\n"
@@ -957,7 +1065,8 @@ def _render_figure(caption: str, path: str) -> str:
     """Render a markdown image as a LaTeX figure environment."""
     global _FIGURE_COUNTER  # noqa: PLW0603
     _FIGURE_COUNTER += 1
-    # Don't escape underscores inside \includegraphics path
+    # Sanitize path for LaTeX: replace spaces, keep underscores
+    path = path.replace(" ", "_")
     cap_tex = _convert_inline(caption) if caption else f"Figure {_FIGURE_COUNTER}"
     label_key = re.sub(r"[^a-z0-9]+", "_", caption.lower()).strip("_")[:30]
     if not label_key:
@@ -965,7 +1074,7 @@ def _render_figure(caption: str, path: str) -> str:
     return (
         "\\begin{figure}[ht]\n"
         "\\centering\n"
-        f"\\includegraphics[width=0.9\\textwidth]{{{path}}}\n"
+        f"\\includegraphics[width=0.9\\columnwidth]{{{path}}}\n"
         f"\\caption{{{cap_tex}}}\n"
         f"\\label{{fig:{label_key}}}\n"
         "\\end{figure}"
@@ -983,7 +1092,10 @@ _INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 
 # Characters that need escaping in LaTeX (but NOT inside math or \cite)
-_LATEX_SPECIAL = re.compile(r"([#%&_])")
+_LATEX_SPECIAL = re.compile(r"([#%&_{}])")
+_LATEX_TILDE = re.compile(r"~")
+_LATEX_CARET = re.compile(r"\^")
+_LATEX_DOLLAR = re.compile(r"(?<!\\)\$")
 
 
 def _convert_inline(text: str) -> str:
@@ -1032,6 +1144,9 @@ def _convert_inline(text: str) -> str:
 
     # Escape special LaTeX characters
     text = _LATEX_SPECIAL.sub(r"\\\1", text)
+    text = _LATEX_TILDE.sub(r"\\textasciitilde{}", text)
+    text = _LATEX_CARET.sub(r"\\textasciicircum{}", text)
+    text = _LATEX_DOLLAR.sub(r"\\$", text)
 
     # Convert bold **text** → \textbf{text}
     text = _BOLD_RE.sub(r"\\textbf{\1}", text)
@@ -1051,7 +1166,7 @@ def _convert_inline(text: str) -> str:
 
     # Fallback: convert any remaining [cite_key] patterns to \cite{key}
     # This catches citations that were not converted upstream.
-    _CITE_KEY_PAT = r"[a-z]+\d{4}[a-z]*"
+    _CITE_KEY_PAT = r"[a-zA-Z][a-zA-Z0-9_-]*\d{4}[a-zA-Z]?"
     text = re.sub(
         rf"\[({_CITE_KEY_PAT}(?:\s*,\s*{_CITE_KEY_PAT})*)\]",
         r"\\cite{\1}",
@@ -1075,6 +1190,7 @@ _EXPECTED_SECTIONS = {
     "method",
     "experiment",
     "result",
+    "discussion",
     "conclusion",
 }
 
@@ -1089,7 +1205,7 @@ _SECTION_ALIASES: dict[str, str] = {
     "results": "result",
     "results and discussion": "result",
     "results and analysis": "result",
-    "discussion": "result",
+    "discussion and results": "result",
     "conclusions": "conclusion",
     "conclusion and future work": "conclusion",
     "summary": "conclusion",
@@ -1155,6 +1271,58 @@ def check_paper_completeness(sections: list[_Section]) -> list[str]:
             f"(expected 5,000-6,500 for conference paper). "
             f"Content may be severely truncated."
         )
+
+
+    # Per-section word count check (safety net during LaTeX conversion)
+    from researchclaw.prompts import SECTION_WORD_TARGETS, _SECTION_TARGET_ALIASES
+
+    for sec in sections:
+        if sec.level not in (1, 2) or not sec.heading:
+            continue
+        canon = sec.heading_lower
+        if canon not in SECTION_WORD_TARGETS:
+            canon = _SECTION_TARGET_ALIASES.get(sec.heading_lower, "")
+        if not canon or canon not in SECTION_WORD_TARGETS:
+            continue
+        lo, hi = SECTION_WORD_TARGETS[canon]
+        wc = len(sec.body.split())
+        if wc < int(lo * 0.6):
+            warnings.append(
+                f"Section '{sec.heading}' is only {wc} words "
+                f"(expected {lo}-{hi}). Content may be severely truncated."
+            )
+        elif wc > int(hi * 1.5):
+            warnings.append(
+                f"Section '{sec.heading}' is {wc} words "
+                f"(expected {lo}-{hi}). Consider trimming."
+            )
+
+    # Bullet density check for body sections
+    _bullet_re_cc = re.compile(r"^\s*[-*]\s+", re.MULTILINE)
+    _numbered_re_cc = re.compile(r"^\s*\d+\.\s+", re.MULTILINE)
+    _bullet_ok_sections = {"introduction", "limitations", "limitation", "abstract"}
+    for sec in sections:
+        if sec.level not in (1, 2) or not sec.heading:
+            continue
+        hl = sec.heading_lower
+        if hl in _bullet_ok_sections:
+            continue
+        if not sec.body:
+            continue
+        total_lines = len([ln for ln in sec.body.splitlines() if ln.strip()])
+        if total_lines < 4:
+            continue
+        bullet_count = (
+            len(_bullet_re_cc.findall(sec.body))
+            + len(_numbered_re_cc.findall(sec.body))
+        )
+        density = bullet_count / total_lines
+        if density > 0.30:
+            warnings.append(
+                f"Section '{sec.heading}' has high bullet-point density "
+                f"({bullet_count}/{total_lines} lines = {density:.0%}). "
+                f"Conference papers should use flowing prose."
+            )
 
     return warnings
 

@@ -501,7 +501,7 @@ class CodeAgent:
             resp = self._chat(sp.system, sp.user, max_tokens=4096)
 
             review = self._parse_json(resp.content)
-            if not review:
+            if not isinstance(review, dict) or not review:
                 self._log_event(
                     f"  Review round {r + 1}: could not parse JSON, skipping"
                 )

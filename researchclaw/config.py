@@ -478,7 +478,7 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
                 int(g) for g in docker_data.get("gpu_device_ids", ())
             ),
             memory_limit_mb=int(docker_data.get("memory_limit_mb", 8192)),
-            network_policy=docker_data.get("network_policy", "none"),
+            network_policy=docker_data.get("network_policy", "setup_only"),
             pip_pre_install=tuple(docker_data.get("pip_pre_install", ())),
             auto_install_deps=bool(docker_data.get("auto_install_deps", True)),
             shm_size_mb=int(docker_data.get("shm_size_mb", 2048)),

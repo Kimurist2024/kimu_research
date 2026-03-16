@@ -216,6 +216,45 @@ class PromptManager:
 # DEFAULT PROMPTS — edit prompts.yaml to override; do NOT edit these.
 # ========================================================================
 
+# -- Canonical section word-count targets ----------------------------------
+# Single source of truth for per-section word-count ranges.
+# Used by executor._validate_draft_quality() and converter.check_paper_completeness().
+SECTION_WORD_TARGETS: dict[str, tuple[int, int]] = {
+    "abstract": (180, 220),
+    "introduction": (800, 1000),
+    "related work": (600, 800),
+    "method": (1000, 1500),
+    "experiments": (800, 1200),
+    "results": (600, 800),
+    "discussion": (400, 600),
+    "limitations": (200, 300),
+    "conclusion": (200, 300),
+    "broader impact": (200, 400),
+}
+
+# Aliases mapping heading variants to canonical names in SECTION_WORD_TARGETS.
+_SECTION_TARGET_ALIASES: dict[str, str] = {
+    "methods": "method",
+    "methodology": "method",
+    "proposed method": "method",
+    "approach": "method",
+    "experimental setup": "experiments",
+    "experimental results": "results",
+    "results and discussion": "results",
+    "results and analysis": "results",
+    "conclusions": "conclusion",
+    "conclusion and future work": "conclusion",
+    "summary": "conclusion",
+    "background": "related work",
+    "literature review": "related work",
+    "prior work": "related work",
+    "limitation": "limitations",
+    "limitations and future work": "limitations",
+    "broader impacts": "broader impact",
+    "societal impact": "broader impact",
+    "ethical considerations": "broader impact",
+}
+
 # -- Reusable blocks -----------------------------------------------------
 
 _DEFAULT_BLOCKS: dict[str, str] = {
@@ -412,6 +451,37 @@ _DEFAULT_BLOCKS: dict[str, str] = {
         "You may also include a `requirements.txt` file listing any additional "
         "pip packages your experiment needs beyond the pre-installed set.\n"
     ),
+    "network_disabled_guidance": (
+        "\n## ⚠️ NO NETWORK ACCESS — CRITICAL CONSTRAINT ⚠️\n"
+        "This experiment runs with network_policy='none'. There is NO network access\n"
+        "at ANY phase (no pip install, no dataset downloads, no HTTP requests).\n\n"
+        "### ONLY these pre-cached datasets are available:\n"
+        "- `torchvision.datasets.CIFAR10(root='/opt/datasets', train=True/False, download=False)`\n"
+        "- `torchvision.datasets.CIFAR100(root='/opt/datasets', train=True/False, download=False)`\n"
+        "- `torchvision.datasets.MNIST(root='/opt/datasets', train=True/False, download=False)`\n"
+        "- `torchvision.datasets.FashionMNIST(root='/opt/datasets', train=True/False, download=False)`\n"
+        "- `torchvision.datasets.STL10(root='/opt/datasets', split='train'/'test', download=False)`\n"
+        "- `torchvision.datasets.SVHN(root='/opt/datasets', split='train'/'test', download=False)`\n\n"
+        "### FORBIDDEN (will cause runtime failure):\n"
+        "- Do NOT create setup.py (it cannot run without network)\n"
+        "- Do NOT create requirements.txt (pip install is unavailable)\n"
+        "- Do NOT use `download=True` on any dataset\n"
+        "- Do NOT use `urllib`, `requests`, `httpx`, or any HTTP library\n"
+        "- Do NOT use `datasets.load_dataset()` from HuggingFace (requires download)\n"
+        "- Do NOT import packages not pre-installed in the Docker image\n\n"
+        "### Available pre-installed packages:\n"
+        "torch, torchvision, torchaudio, numpy, scipy, sklearn, matplotlib, seaborn,\n"
+        "pandas, tqdm, gymnasium, networkx, PyYAML, Pillow, timm, einops, torchmetrics,\n"
+        "h5py, transformers, datasets, accelerate, peft, bitsandbytes.\n\n"
+        "If your research topic requires a dataset NOT in the pre-cached list,\n"
+        "you MUST adapt to use one of the 6 pre-cached datasets instead.\n"
+    ),
+    "network_full_guidance": (
+        "\n## Network Access: Full\n"
+        "This experiment runs with network_policy='full'. Network access is available\n"
+        "throughout ALL execution phases (setup, pip install, and main experiment).\n"
+        "You may download datasets, install packages, and make HTTP requests at any time.\n"
+    ),
     "hp_reporting": (
         "\n## Hyperparameter Reporting (MANDATORY)\n"
         "At the TOP of main.py, define a HYPERPARAMETERS dictionary containing ALL "
@@ -440,6 +510,20 @@ _DEFAULT_BLOCKS: dict[str, str] = {
         "Reinforcement learning requires MANY more training steps than supervised learning.\n"
         "Under-trained RL agents produce random-chance performance, making ALL comparisons\n"
         "meaningless and the paper unpublishable.\n\n"
+        "### Environment Availability:\n"
+        "#### Always available (classic control — no extra dependencies):\n"
+        "- CartPole-v1, Pendulum-v1, MountainCar-v0, MountainCarContinuous-v0,\n"
+        "  Acrobot-v1, LunarLander-v3\n"
+        "- These are lightweight and fast — PREFER these unless MuJoCo is specifically required.\n\n"
+        "#### MuJoCo environments (pre-installed in Docker image):\n"
+        "- HalfCheetah-v5, Hopper-v5, Walker2d-v5, Ant-v5, Humanoid-v5,\n"
+        "  Swimmer-v5, Reacher-v5, InvertedPendulum-v5, InvertedDoublePendulum-v5\n"
+        "- Require MuJoCo runtime — available in Docker but NOT in basic sandbox mode.\n\n"
+        "#### RULE: If the research topic says 'MuJoCo-free', 'without MuJoCo',\n"
+        "  or 'classic control only' → you MUST use classic control environments ONLY.\n"
+        "  Do NOT import or reference MuJoCo in any way.\n\n"
+        "#### DEFAULT RECOMMENDATION: Prefer classic control environments unless the\n"
+        "  research topic specifically requires MuJoCo locomotion tasks.\n\n"
         "### Minimum Steps by Algorithm Family:\n"
         "| Algorithm | Environment | Min Steps | Recommended |\n"
         "|-----------|-------------|-----------|-------------|\n"
@@ -506,37 +590,69 @@ _DEFAULT_BLOCKS: dict[str, str] = {
     ),
     "writing_structure": (
         "\n## Paper Section Writing Rules\n"
-        "ABSTRACT (150-200 words, 5-sentence structure):\n"
+        "ABSTRACT (5-sentence structure):\n"
         "- (1) Problem and significance (2) Prior approaches and gaps\n"
         "- (3) Your approach and novelty (4) Key results with 2-3 specific numbers\n"
         "- (5) Implication/takeaway\n"
         "- Do NOT list per-seed ranges (e.g., '0.71-0.73 across seeds') — use mean +/- std\n"
         "- Do NOT repeat numbers that appear in the Results section — pick the 2-3 most impactful\n\n"
-        "INTRODUCTION (800-1200 words):\n"
-        "- Paragraph 1: Problem motivation (why this matters)\n"
-        "- Paragraph 2: What exists and why it falls short\n"
-        "- Paragraph 3: Your approach and key insight\n"
-        "- Paragraph 4: Contributions (2-3 bullet points)\n\n"
-        "RELATED WORK (600-900 words):\n"
-        "- Organize by sub-topic, not chronologically\n"
-        "- End each paragraph with how your work differs\n"
-        "- Cite at least 15 references, all directly relevant\n\n"
-        "METHOD (800-1200 words):\n"
-        "- Full algorithm description (pseudocode or step-by-step)\n"
-        "- All hyperparameters with values and justification\n"
-        "- Architecture details sufficient for reproduction\n\n"
-        "RESULTS (800-1200 words):\n"
+        "INTRODUCTION (4 paragraphs, 800-1000 words, cite 8-12 references):\n"
+        "Paragraph 1: Problem motivation (why this matters). "
+        "Paragraph 2: What exists and why it falls short. "
+        "Paragraph 3: Your approach and key insight. "
+        "Paragraph 4: Contributions (2-3 bullet points allowed here ONLY).\n\n"
+        "RELATED WORK:\n"
+        "Organize by sub-topic, not chronologically. "
+        "End each paragraph with how YOUR work differs from the cited work. "
+        "Cite at least 15 references, all directly relevant.\n\n"
+        "METHOD:\n"
+        "Write as flowing narrative prose (NOT bullet points). "
+        "Include full algorithm description with pseudocode or step-by-step. "
+        "State all hyperparameters with values and justification. "
+        "Provide architecture details sufficient for reproduction.\n\n"
+        "RESULTS:\n"
         "- Do NOT repeat the same number more than twice across the paper\n"
         "- Each number in a table should be discussed AT MOST once in text\n"
         "- Tables: mean +/- std with 95%% CI in parentheses\n"
         "- Bold the best result in each column\n"
-        "- Every comparison claim must cite a p-value\n\n"
-        "LIMITATIONS (200-400 words, 3-5 points):\n"
+        "- Every comparison claim must cite a p-value or note multiple seeds\n"
+        "- Report the number of random seeds/runs used\n\n"
+        "FIGURES AND TABLES:\n"
+        "- Every figure MUST be referenced in the text (e.g., 'As shown in Figure 1')\n"
+        "- Every table MUST be referenced in the text (e.g., 'Table 2 summarizes')\n"
+        "- Figure captions: 1-2 descriptive sentences (not just 'Results comparison')\n"
+        "- Table captions go ABOVE the table; figure captions go BELOW the figure\n"
+        "- Axis labels must include units where applicable\n"
+        "- Use consistent font sizes across all figures\n\n"
+        "DISCUSSION (if applicable, can be merged into Results):\n"
+        "- Paragraph 1: Summarize key findings and their significance\n"
+        "- Paragraph 2: Compare with prior work — explain WHY results differ\n"
+        "- Paragraph 3: Discuss unexpected or negative results honestly\n"
+        "- Paragraph 4: Broader implications and practical applications\n\n"
+        "LIMITATIONS (3-5 points):\n"
         "- State each limitation ONCE, here only — not scattered throughout\n"
-        "- No disclaimers like 'due to computational constraints'\n\n"
-        "CONCLUSION (200-300 words):\n"
+        "- No disclaimers like 'due to computational constraints'\n"
+        "- Include compute resources used (GPU type, training time)\n\n"
+        "CONCLUSION:\n"
         "- Summarize findings (match actual results, no aspirational claims)\n"
-        "- 2-3 sentences of future work\n"
+        "- 2-3 sentences of future work\n\n"
+        "PROSE QUALITY (CRITICAL — violation = desk reject):\n"
+        "- Write FLOWING ACADEMIC PARAGRAPHS, not bullet-point lists.\n"
+        "- Each paragraph must have 4-8 sentences with smooth transitions.\n"
+        "- Introduction, Related Work, and Method must each be >=3 paragraphs.\n"
+        "- FORBIDDEN: starting 3+ consecutive paragraphs with the same word.\n"
+        "- FORBIDDEN: bullet-point lists in Introduction or Related Work sections.\n"
+        "- Use varied sentence structures: mix simple, compound, and complex sentences.\n"
+        "- Connect paragraphs with transition phrases: 'Building on this insight...', "
+        "'In contrast to prior work...', 'To address this limitation...'.\n"
+        "- Each Related Work paragraph must COMPARE your approach to cited work, "
+        "not merely summarize what each paper does.\n"
+        "- FORBIDDEN AI-BOILERPLATE phrases (instant credibility loss):\n"
+        "  'delves into', 'it is worth noting', 'plays a crucial role',\n"
+        "  'leverages the power of', 'paves the way', 'a myriad of',\n"
+        "  'paradigm shift', 'groundbreaking', 'in the realm of',\n"
+        "  'holistic approach', 'multifaceted', 'navigate the complexities'.\n"
+        "  Replace ALL such phrases with precise, specific academic language.\n"
     ),
     "llm_training_guidance": (
         "\n## LLM Fine-Tuning Guidance (when topic involves language model training)\n"
@@ -673,7 +789,7 @@ _DEFAULT_BLOCKS: dict[str, str] = {
         "  - Compare findings with prior work (cite papers here!)\n"
         "  - Explain surprising results; broader implications\n\n"
         "LIMITATIONS (200-300 words): 3-5 specific, concrete limitations. ALL caveats go HERE.\n\n"
-        "CONCLUSION (200-300 words): Summarize in 2-3 sentences, future work in 2-3 sentences.\n\n"
+        "CONCLUSION: Summarize in 2-3 sentences, future work in 2-3 sentences.\n\n"
         "### Writing Quality Rules\n"
         "- Write as FLOWING PROSE, not bullet points or enumerated lists\n"
         "- Each paragraph: topic sentence, evidence, analysis, transition\n"
@@ -712,19 +828,20 @@ _DEFAULT_BLOCKS: dict[str, str] = {
         "### Example: BAD vs GOOD Method Description\n"
         "BAD (bullet-list style):\n"
         "  'Our method has three components:\n"
-        "   - A feature extractor using ResNet-50\n"
-        "   - A prototype memory bank with 100 slots\n"
-        "   - A drift detector using MMD test'\n\n"
+        "   - Component A\n"
+        "   - Component B\n"
+        "   - Component C'\n\n"
         "GOOD (narrative style):\n"
-        "  'Our method builds on the insight that catastrophic forgetting in continual\n"
-        "   meta-learning stems from distributional shift in the feature space. To address\n"
-        "   this, we introduce ProtoMem, a three-stage framework. First, a shared feature\n"
-        "   extractor (ResNet-50) maps inputs to a 512-d embedding space. These embeddings\n"
-        "   feed into a prototype memory bank maintaining 100 class prototypes via exponential\n"
-        "   moving average, enabling knowledge preservation without storing raw examples.\n"
-        "   Crucially, we augment this with an online drift detector based on the Maximum\n"
-        "   Mean Discrepancy test (Gretton et al., 2012), triggering selective memory\n"
-        "   consolidation when input distribution shifts beyond a calibrated threshold.'\n"
+        "  'Our method builds on the insight that [core problem] stems from\n"
+        "   [root cause identified in Section 2]. To address this, we introduce\n"
+        "   [MethodName], a [N]-stage framework. First, [Stage 1] maps inputs\n"
+        "   to [representation]. These representations feed into [Stage 2],\n"
+        "   enabling [benefit] without [drawback of prior approaches].\n"
+        "   Crucially, we augment this with [Stage 3] based on [technical\n"
+        "   foundation] (cite original paper), triggering [mechanism] when\n"
+        "   [condition is met].'\n"
+        "  NOTE: Replace all [placeholders] with YOUR actual method details.\n"
+        "  Do NOT copy this template verbatim.\n"
     ),
     # IMP-31: Anti-hedging rules
     "anti_hedging_rules": (
@@ -767,6 +884,10 @@ DEBATE_ROLES_HYPOTHESIS: dict[str, dict[str, str]] = {
         ),
         "user": (
             "Generate at least 2 novel, unconventional hypotheses from the synthesis below.\n"
+            "CRITICAL REQUIREMENTS for EVERY hypothesis:\n"
+            "1. NOVELTY: Must go beyond incremental combination of existing methods.\n"
+            "2. FEASIBILITY: Must be testable within 30 minutes of compute on a single GPU.\n"
+            "3. FALSIFIABILITY: Must define a specific metric threshold that would reject it.\n"
             "For each hypothesis provide:\n"
             "- A bold claim that pushes boundaries\n"
             "- Cross-domain inspiration (if applicable)\n"
@@ -941,14 +1062,18 @@ _DEFAULT_SUB_PROMPTS: dict[str, dict[str, Any]] = {
             "Primary metric key: {metric_key}\n"
             "Metric direction: {metric_direction}\n"
             "Do not use subprocess, os.system, eval, exec, or any network/shell calls.\n\n"
-            "TOPIC-CODE ALIGNMENT CHECK (do this FIRST):\n"
+            "EXPERIMENT PLAN ANCHOR (CRITICAL — read before making changes):\n"
             "The research topic is: {topic}\n"
-            "Before making incremental improvements, verify that the current code "
-            "actually implements an experiment relevant to this topic. If the code "
-            "is fundamentally unrelated to the topic (e.g., a generic optimizer "
-            "when the topic is about multi-agent simulation, or a trivial function "
-            "when a complex simulation is needed), REWRITE the code from scratch "
-            "to match the topic. Do NOT incrementally improve irrelevant code.\n\n"
+            "{exp_plan_anchor}"
+            "RULES FOR REFINEMENT:\n"
+            "- NEVER rename, remove, or replace existing condition names. "
+            "The condition names in the code MUST match the experiment plan.\n"
+            "- NEVER add new conditions that are not in the experiment plan.\n"
+            "- ONLY improve the IMPLEMENTATION of existing conditions "
+            "(fix bugs, tune hyperparameters, improve training loops).\n"
+            "- If the code has fundamental issues (wrong algorithm, missing "
+            "components), fix the implementation but keep the same condition "
+            "names and class hierarchy.\n\n"
             "{condition_coverage_hint}"
             "Current project files:\n{files_context}\n"
             "Run summaries (JSON):\n{run_summaries}"
@@ -960,6 +1085,12 @@ _DEFAULT_SUB_PROMPTS: dict[str, dict[str, Any]] = {
         "user": (
             "Fix all validation issues in main.py and return corrected Python code only.\n\n"
             "## Validation Issues\n{issue_text}\n\n"
+            "## Common RL Stability Fixes (apply if NaN/divergence detected):\n"
+            "- Add gradient clipping: `torch.nn.utils.clip_grad_norm_(params, 1.0)`\n"
+            "- Lower learning rate to 1e-4 or 3e-4\n"
+            "- Add reward normalization/clipping: `reward = np.clip(reward, -10, 10)`\n"
+            "- Add NaN guard: `if torch.isnan(loss): continue`\n"
+            "- Use float32 (not float16) for RL value functions\n\n"
             "## All Project Files\n{all_files_ctx}"
         ),
     },
@@ -1122,8 +1253,8 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
     "topic_init": {
         "system": (
             "You are a rigorous research planner who identifies NOVEL, TIMELY "
-            "research angles. You follow recent trends from top ML conferences "
-            "(NeurIPS, ICML, ICLR 2024-2026) and propose research that advances "
+            "research angles. You follow recent trends from top venues in the "
+            "relevant domain and propose research that advances "
             "the frontier rather than repeating known results.\n\n"
             "NOVELTY PRINCIPLES:\n"
             "- A good research angle addresses a GAP not yet covered by existing work.\n"
@@ -1299,7 +1430,7 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
     },
     # ── Phase D: Experiment Design ───────────────────────────────────────
     "experiment_design": {
-        "system": "You are a principal investigator designing ML experiments.",
+        "system": "You are a principal investigator designing rigorous research experiments.",
         "user": (
             "{preamble}\n\n"
             "Design an experiment plan as YAML.\n"
@@ -1344,7 +1475,11 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
             "(NaN/divergence, reward explosion, policy collapse) and mitigations "
             "(gradient clipping, reward normalization, early stopping on NaN).\n"
             "- Under `metrics`, include:\n"
-            "  * Primary metric with direction and units\n"
+            "  * Primary metric: `{metric_key}` with direction: `{metric_direction}` "
+            "and units\n"
+            "  * IMPORTANT: The metric direction MUST be `{metric_direction}` — do "
+            "NOT use a different direction. If {metric_direction}=='minimize', lower "
+            "is better. If {metric_direction}=='maximize', higher is better.\n"
             "  * `success_rate`: fraction of seeds that complete without NaN/crash\n"
             "  * At least ONE discovery-aligned endpoint (e.g., identification "
             "accuracy, time-to-discovery, final posterior mass on true hypothesis) "
@@ -1370,6 +1505,22 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
             "(NOT paired t-test with n < 10)\n"
             "- Report effect sizes (Cohen's d or rank-biserial correlation)\n"
             "- 3 seeds is INSUFFICIENT — reviewers will reject papers with n=3\n\n"
+            "COMPUTE BUDGET CONSTRAINT (CRITICAL — experiments MUST fit time budget):\n"
+            "- Total experiment time budget: {time_budget_sec} seconds.\n"
+            "- Compute the TOTAL number of runs: num_conditions × num_envs × "
+            "num_regimes × num_seeds.\n"
+            "- Each run needs AT LEAST 60 seconds for RL (environment setup + "
+            "training + evaluation). For deep learning, at least 30 seconds.\n"
+            "- HARD CAP: total_runs × estimated_seconds_per_run MUST be < "
+            "{time_budget_sec} × 0.8 (leave 20% margin for overhead).\n"
+            "- If total_runs would exceed the budget, you MUST reduce by:\n"
+            "  1. First: reduce seeds to 5 (minimum for statistical validity)\n"
+            "  2. Then: reduce regimes to 2\n"
+            "  3. Then: reduce environments to 1\n"
+            "  4. Last resort: reduce conditions (merge similar ablations)\n"
+            "- Example: {time_budget_sec}s budget with 60s/run → max ~"
+            "{time_budget_sec} / 60 = budget_runs total runs.\n"
+            "- NEVER generate a plan with >30 total runs for a 1800s budget.\n\n"
             "IMPLEMENTATION SPECIFICATION (CRITICAL for code generation):\n"
             "For each proposed method AND each baseline, you MUST include an "
             "'implementation_spec' key with:\n"
@@ -1437,9 +1588,12 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
             "```filename:main.py\n"
             "# entry point code\n"
             "```\n\n"
-            "```filename:optimizers.py\n"
-            "# optimizer implementations\n"
+            "```filename:models.py\n"
+            "# model/algorithm implementations\n"
             "```\n\n"
+            "Only create additional files (optimizers.py, data_utils.py, etc.) "
+            "if they contain substantial logic (>20 lines). Do NOT create stub "
+            "files with only imports or pass statements.\n\n"
             "CODE STRUCTURE:\n"
             "- main.py: entry point that runs experiments and prints metrics\n"
             "- main.py MUST begin with a docstring specifying:\n"
@@ -1500,7 +1654,7 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
             "METRIC DEFINITION REQUIREMENT (CRITICAL):\n"
             "- At the top of main.py, include a docstring or comment block that defines:\n"
             "  * METRIC NAME: the exact key printed as `{metric}: <value>`\n"
-            "  * DIRECTION: whether higher is better or lower is better\n"
+            "  * DIRECTION: {metric_direction_hint}\n"
             "  * UNITS/SCALE: what the number represents (e.g., MSE in log scale, "
             "accuracy 0-1, discovery rate per episode)\n"
             "  * FORMULA: how the metric is computed from raw experiment outputs\n"
@@ -1741,7 +1895,7 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
     # ── Phase F: Analysis & Decision ─────────────────────────────────────
     "result_analysis": {
         "system": (
-            "You are a quantitative ML analyst. Always cite exact numbers "
+            "You are a quantitative research analyst. Always cite exact numbers "
             "from the provided data."
         ),
         "user": (
@@ -1845,7 +1999,7 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
     },
     "paper_draft": {
         "system": (
-            "You are a top-tier ML paper author writing for NeurIPS/ICML/ICLR.\n\n"
+            "You are a top-tier academic paper author writing for leading venues.\n\n"
             "KEY PRINCIPLES (from accepted paper analyses):\n"
             "1. NOVELTY: A good paper has 1-2 key ideas and keeps the rest simple.\n"
             "2. NARRATIVE: A short, rigorous, evidence-based technical story with a takeaway.\n"
@@ -1872,10 +2026,10 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
             "hyperparameters (learning rate, clipping, discount factor, etc.), "
             "state/observation representation, reward definition, and baseline "
             "configurations.\n"
-            "13. For RL methods: specify policy architecture, training procedure "
-            "(number of rollouts, epochs, batch handling), and any stability "
-            "mechanisms (gradient clipping, reward normalization).\n"
-            "14. For baselines: specify acquisition function, surrogate model, "
+            "13. For learning-based methods: specify model architecture, training procedure "
+            "(iterations, epochs, batch handling), and any stability "
+            "mechanisms (regularization, normalization).\n"
+            "14. For baselines: specify the exact algorithm/method configuration "
             "and any tuning performed to make baselines competitive.\n\n"
             "FAILURE-AWARE REPORTING REQUIREMENTS:\n"
             "15. If any method has a success rate < 100%%, the Results section "
@@ -1899,9 +2053,8 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
             "statistical grounding.\n\n"
             "METHOD NAMING RULES:\n"
             "21. NEVER use generic labels like 'baseline_1', 'method_variant_1', "
-            "'method_variant_2' in the paper. Use descriptive algorithm names "
-            "(e.g., 'Random Search', 'Bayesian Optimization', 'PPO', "
-            "'Curiosity-Driven RL'). Generic labels make the paper "
+            "'method_variant_2' in the paper. Use descriptive algorithm/method names "
+            "that reflect what the method actually does. Generic labels make the paper "
             "scientifically uninterpretable.\n"
             "22. Each method MUST have a full description: architecture, "
             "training procedure, key hyperparameters, and implementation details. "
@@ -1944,8 +2097,13 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
             "{anti_repetition_rules}\n"
             "Write a full paper draft section by section in markdown.\n"
             "Required sections: Title, Abstract, Introduction, Related Work, "
-            "Method, Experiments, Results, Limitations, Conclusion, "
-            "References.\n"
+            "Method, Experiments, Results, Discussion, Limitations, Broader Impact, "
+            "Conclusion, References.\n"
+            "The Broader Impact section (2-3 paragraphs) MUST discuss: "
+            "(1) potential positive societal impacts of this work, "
+            "(2) potential negative societal impacts or risks, "
+            "(3) ethical considerations specific to this research area. "
+            "This section is MANDATORY for top ML venues and recommended for all research papers.\n"
             "{writing_structure}\n"
             "{topic_constraint}"
             "{exp_metrics_instruction}"
@@ -2023,7 +2181,7 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
             "  (![Caption](charts/...)). If the draft has zero figures, ADD them in the Results\n"
             "  section using the chart files. A paper with zero figures will be desk-rejected.\n"
             "- Consolidate ALL hedging/caveats into Limitations section only.\n"
-            "- The final paper body MUST be <= 6,500 words for NeurIPS 9-page limit.\n"
+            "- The final paper body MUST be <= 6,500 words (standard 9-page conference limit).\n"
             "  If the current draft exceeds this, compress by removing redundant restatements.\n"
             "{writing_structure}\n"
             "{topic_constraint}"

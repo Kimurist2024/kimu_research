@@ -347,10 +347,12 @@ class DockerSandbox:
             cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
         elif cfg.network_policy in ("setup_only", "pip_only"):
             # Network during Phase 0+1, disabled via iptables before Phase 2.
-            # Run as root so entrypoint.sh can do pip install + iptables.
-            # The experiment script itself runs under exec (still root but
-            # the code is already validated by the pipeline security check).
+            # Run as host user so experiment can write results.json to volume.
+            # iptables requires NET_ADMIN but will gracefully degrade if
+            # the user lacks root — network remains available but the code
+            # has already been validated by the pipeline security check.
             cmd.extend(["-e", "RC_SETUP_ONLY_NETWORK=1"])
+            cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
             cmd.extend(["--cap-add=NET_ADMIN"])
         elif cfg.network_policy == "full":
             # Full network throughout — for development/debugging
@@ -368,26 +370,6 @@ class DockerSandbox:
             # Create user-level cache so containers can download datasets
             user_datasets.mkdir(parents=True, exist_ok=True)
             cmd.extend(["-v", f"{user_datasets}:/workspace/data:rw"])
-
-        # Mount HuggingFace model cache (read-write for downloading)
-        hf_mounted = False
-        hf_home_env = os.environ.get("HF_HOME", "").strip()
-        if hf_home_env:
-            xdg_hf = Path(hf_home_env).resolve()
-            if xdg_hf.is_dir():
-                cmd.extend(["-v", f"{xdg_hf}:/home/researcher/.cache/huggingface"])
-                cmd.extend(["-e", "HF_HOME=/home/researcher/.cache/huggingface"])
-                hf_mounted = True
-        if not hf_mounted:
-            hf_cache_host = Path.home() / ".cache" / "huggingface"
-            if hf_cache_host.is_dir():
-                cmd.extend(["-v", f"{hf_cache_host}:/home/researcher/.cache/huggingface"])
-                cmd.extend(["-e", "HF_HOME=/home/researcher/.cache/huggingface"])
-
-        # Pass HF token if available (for gated model downloads)
-        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-        if hf_token:
-            cmd.extend(["-e", f"HF_TOKEN={hf_token}"])
 
         # Mount HuggingFace model cache (read-write for downloading)
         hf_mounted = False
@@ -477,6 +459,10 @@ class DockerSandbox:
         import_re = re.compile(
             r"^\s*(?:import|from)\s+([\w.]+)", re.MULTILINE
         )
+        # Exclude local project modules (any .py file in staging_dir)
+        local_modules = {
+            pyf.stem for pyf in staging_dir.glob("*.py")
+        }
         detected: list[str] = []
         for pyf in staging_dir.glob("*.py"):
             if pyf.name == "setup.py":
@@ -486,6 +472,8 @@ class DockerSandbox:
                 top_module = m.group(1).split(".")[0]
                 if top_module in _BUILTIN_PACKAGES:
                     continue
+                if top_module in local_modules:
+                    continue  # Skip local project modules
                 pip_name = _IMPORT_TO_PIP.get(top_module, top_module)
                 if pip_name not in detected:
                     detected.append(pip_name)

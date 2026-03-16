@@ -51,7 +51,7 @@ class RendererAgent(BaseAgent):
         """
         try:
             scripts = context.get("scripts", [])
-            output_dir = Path(context.get("output_dir", "charts"))
+            output_dir = Path(context.get("output_dir", "charts")).resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
             scripts_dir = output_dir / "scripts"
             scripts_dir.mkdir(parents=True, exist_ok=True)
@@ -122,14 +122,15 @@ class RendererAgent(BaseAgent):
         script_path.write_text(script_code, encoding="utf-8")
         result["script_path"] = str(script_path)
 
-        # Execute script
+        # Execute script — resolve to absolute paths so cwd doesn't
+        # cause the relative script path to be re-resolved incorrectly.
         try:
             proc = subprocess.run(
-                [self._python, str(script_path)],
+                [self._python, str(script_path.resolve())],
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
-                cwd=str(output_dir.parent),
+                cwd=str(output_dir.resolve().parent),
             )
         except subprocess.TimeoutExpired:
             result["error"] = f"Script timed out after {self._timeout}s"

@@ -98,16 +98,17 @@ def compile_latex(
 
         if proc.returncode == 0:
             result.success = True
-            # Run bibtex + second pdflatex pass for bibliography
+            # Run bibtex + two more pdflatex passes for bibliography & cross-refs
             bib_stem = tex_name.rsplit(".", 1)[0]
             _run_bibtex(work_dir, bib_stem, timeout=60)
-            subprocess.run(
-                ["pdflatex", "-interaction=nonstopmode", tex_name],
-                cwd=work_dir,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            for _pass in range(2):
+                subprocess.run(
+                    ["pdflatex", "-interaction=nonstopmode", tex_name],
+                    cwd=work_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
             logger.info("IMP-18: LaTeX compiled successfully on attempt %d", attempt)
             break
 
@@ -224,6 +225,121 @@ def _parse_log(log_text: str) -> tuple[list[str], list[str]]:
             errors.append(line_stripped)
 
     return errors, warnings
+
+
+@dataclass
+class QualityCheckResult:
+    """Results of post-compilation quality checks."""
+
+    unresolved_refs: list[str] = field(default_factory=list)
+    unresolved_cites: list[str] = field(default_factory=list)
+    overfull_hboxes: list[str] = field(default_factory=list)
+    underfull_hboxes: list[str] = field(default_factory=list)
+    page_count: int = 0
+    orphan_figures: list[str] = field(default_factory=list)
+    orphan_labels: list[str] = field(default_factory=list)
+    warnings_summary: list[str] = field(default_factory=list)
+
+    @property
+    def has_critical_issues(self) -> bool:
+        return bool(self.unresolved_refs or self.unresolved_cites)
+
+
+def check_compiled_quality(
+    tex_path: Path,
+    *,
+    page_limit: int = 10,
+) -> QualityCheckResult:
+    """Run post-compilation quality checks on a LaTeX document.
+
+    Parses the .log file and .tex source for:
+    - Unresolved references (??)
+    - Unresolved citations
+    - Overfull/underfull hboxes
+    - Page count vs limit
+    - Orphan figures (defined but never referenced, or vice versa)
+    """
+    result = QualityCheckResult()
+    work_dir = tex_path.parent
+    stem = tex_path.stem
+
+    # --- Parse .log file ---
+    log_path = work_dir / f"{stem}.log"
+    if log_path.exists():
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        for line in log_text.split("\n"):
+            line_s = line.strip()
+            # Unresolved references
+            if "LaTeX Warning: Reference" in line_s and "undefined" in line_s:
+                result.unresolved_refs.append(line_s)
+            # Unresolved citations
+            if "LaTeX Warning: Citation" in line_s and "undefined" in line_s:
+                result.unresolved_cites.append(line_s)
+            # Overfull hboxes (only flag significant ones > 1pt)
+            if "Overfull \\hbox" in line_s:
+                m = re.search(r"(\d+\.?\d*)pt", line_s)
+                if m and float(m.group(1)) > 1.0:
+                    result.overfull_hboxes.append(line_s)
+            # Underfull hboxes (badness >= 5000)
+            if "Underfull \\hbox" in line_s and "badness" in line_s:
+                m = re.search(r"badness (\d+)", line_s)
+                if m and int(m.group(1)) >= 5000:
+                    result.underfull_hboxes.append(line_s)
+
+    # --- Count pages from .aux or .log ---
+    aux_path = work_dir / f"{stem}.aux"
+    if aux_path.exists():
+        aux_text = aux_path.read_text(encoding="utf-8", errors="replace")
+        # Look for \newlabel{LastPage}{{N}{...}}
+        m = re.search(r"\\newlabel\{LastPage\}\{\{(\d+)\}", aux_text)
+        if m:
+            result.page_count = int(m.group(1))
+    if result.page_count == 0 and log_path.exists():
+        # Fallback: count "Output written on ... (N pages)"
+        m = re.search(r"Output written on .* \((\d+) page", log_text)
+        if m:
+            result.page_count = int(m.group(1))
+
+    # --- Cross-reference validation ---
+    tex_text = tex_path.read_text(encoding="utf-8", errors="replace")
+    # Find all \label{fig:X}
+    fig_labels = set(re.findall(r"\\label\{(fig:[^}]+)\}", tex_text))
+    # Find all \ref{fig:X}
+    fig_refs = set(re.findall(r"\\ref\{(fig:[^}]+)\}", tex_text))
+    # Orphan labels (defined but never referenced)
+    result.orphan_labels = sorted(fig_labels - fig_refs)
+    # Orphan references (referenced but never defined)
+    result.orphan_figures = sorted(fig_refs - fig_labels)
+
+    # --- Build warnings summary ---
+    if result.unresolved_refs:
+        result.warnings_summary.append(
+            f"{len(result.unresolved_refs)} unresolved reference(s)"
+        )
+    if result.unresolved_cites:
+        result.warnings_summary.append(
+            f"{len(result.unresolved_cites)} unresolved citation(s)"
+        )
+    if result.overfull_hboxes:
+        result.warnings_summary.append(
+            f"{len(result.overfull_hboxes)} overfull hbox(es) > 1pt"
+        )
+    if result.page_count > page_limit:
+        result.warnings_summary.append(
+            f"Page count {result.page_count} exceeds limit {page_limit}"
+        )
+    if result.orphan_figures:
+        result.warnings_summary.append(
+            f"{len(result.orphan_figures)} referenced but undefined figure(s): "
+            + ", ".join(result.orphan_figures[:3])
+        )
+    if result.orphan_labels:
+        result.warnings_summary.append(
+            f"{len(result.orphan_labels)} defined but unreferenced figure(s): "
+            + ", ".join(result.orphan_labels[:3])
+        )
+
+    return result
 
 
 def _run_bibtex(work_dir: Path, stem: str, timeout: int = 60) -> bool:

@@ -73,8 +73,8 @@ def test_build_run_command_setup_only(tmp_path: Path):
     # Should NOT have --network none (needs network for setup)
     network_indices = [i for i, x in enumerate(cmd) if x == "--network"]
     assert len(network_indices) == 0
-    # Should NOT have --user (runs as root for pip install)
-    assert "--user" not in cmd
+    # Should have --user (runs as host user so experiment can write results.json)
+    assert "--user" in cmd
 
 
 def test_build_run_command_full_network(tmp_path: Path):

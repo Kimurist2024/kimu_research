@@ -29,6 +29,7 @@ from researchclaw.templates.converter import (
     _parse_alignments,
     _render_itemize,
     _render_enumerate,
+    check_paper_completeness,  # noqa: F401
 )
 
 
@@ -103,7 +104,7 @@ class TestRenderPreamble:
 
     def test_icml_preamble_extra(self) -> None:
         tex = ICML_2025.render_preamble("Title", "Author", "Abstract")
-        assert r"\icmltitlerunning{Running Title}" in tex
+        assert r"\icmltitlerunning{Title}" in tex
 
 
 class TestRenderFooter:
@@ -157,8 +158,8 @@ class TestListConferences:
         assert "neurips_2025" in names
         assert "iclr_2026" in names
         assert "icml_2026" in names
-        # Should be deduplicated — no aliases
-        assert len(names) == 6
+        # Should be deduplicated — no aliases (6 conference + 1 generic)
+        assert len(names) == 7
 
     def test_sorted(self) -> None:
         names = list_conferences()
@@ -364,7 +365,7 @@ class TestTableRendering:
         ]
         result = _render_table(lines)
         assert r"\begin{table}" in result
-        assert r"\begin{tabular}{l l}" in result
+        assert r"\begin{tabular}{ll}" in result
         assert r"\toprule" in result
         assert r"\textbf{Name}" in result
         assert r"\midrule" in result
@@ -570,3 +571,64 @@ class TestHitlStageValidation:
         result = validate_config(data, check_paths=False)
         assert not result.ok
         assert any("24" in e for e in result.errors)
+
+
+# =====================================================================
+# check_paper_completeness — section word count + bullet density checks
+# =====================================================================
+
+
+class TestCompletenessWordCountAndBullets:
+    """Tests for new per-section word count and bullet density checks."""
+
+    @staticmethod
+    def _make_sections(section_specs: list[tuple[str, int, bool]]) -> list:
+        """Build _Section objects from (heading, word_count, use_bullets) specs."""
+        results = []
+        for heading, wc, bullets in section_specs:
+            if bullets:
+                lines = [f"- Point number {i}" for i in range(wc // 3)]
+                body = "\n".join(lines)
+            else:
+                body = " ".join(["word"] * wc)
+            results.append(
+                type("_Section", (), {
+                    "level": 1,
+                    "heading": heading,
+                    "heading_lower": heading.lower(),
+                    "body": body,
+                })()
+            )
+        return results
+
+    def test_completeness_section_word_count_short(self) -> None:
+        """A Method section with only 100 words triggers a warning."""
+        secs = self._make_sections([
+            ("Title", 5, False),
+            ("Abstract", 200, False),
+            ("Introduction", 900, False),
+            ("Related Work", 700, False),
+            ("Method", 100, False),
+            ("Experiments", 1000, False),
+            ("Results", 700, False),
+            ("Conclusion", 250, False),
+        ])
+        warns = check_paper_completeness(secs)
+        method_warns = [w for w in warns if "Method" in w and "words" in w]
+        assert len(method_warns) >= 1, f"Expected word count warning, got: {warns}"
+
+    def test_completeness_bullet_density(self) -> None:
+        """A Method section full of bullet points triggers a warning."""
+        secs = self._make_sections([
+            ("Title", 5, False),
+            ("Abstract", 200, False),
+            ("Introduction", 900, False),
+            ("Related Work", 700, False),
+            ("Method", 300, True),
+            ("Experiments", 1000, False),
+            ("Results", 700, False),
+            ("Conclusion", 250, False),
+        ])
+        warns = check_paper_completeness(secs)
+        bullet_warns = [w for w in warns if "bullet" in w.lower() and "Method" in w]
+        assert len(bullet_warns) >= 1, f"Expected bullet warning, got: {warns}"
