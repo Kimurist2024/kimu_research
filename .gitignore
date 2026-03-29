@@ -96,9 +96,16 @@ docs/tasks/
 docs/feature_expansion_analysis.*
 docs/tester_guide_cn.*
 
-# Large files excluded from GitHub (size limit)
+# Large files - 3DGS disaster
 research/3dgs_disaster/IMG_6356.MOV
+research/3dgs_disaster/splat.ply
 research/3dgs_disaster/OpenSplat/
 research/3dgs_disaster/supersplat/
-research/3dgs_disaster/splat.ply
-research/shiba_classifier/
+research/3dgs_disaster/input/
+
+# Large files - shiba classifier
+research/shiba_classifier/data/
+research/shiba_classifier/models/
+research/shiba_classifier/*.jpg
+research/shiba_classifier/logs/
+research/shiba_classifier/reports/figures/
